@@ -4,8 +4,9 @@
 - Wofür: eine Bauidee an der echten Stelle der eigenen Welt prüfen und sie danach ohne Rätselraten im Spiel nachbauen.
 - Wer, wann: Lukas, am Mac in Chrome, vor oder während einer Minecraft-Sitzung (Java 26.x). Seine Welt ist ein Realm, sie kommt als heruntergeladener Ordner, nicht als ZIP.
 - Gelungen, wenn: das Bauwerk steht in Litematica exakt dort, wo es in der App stand, und die Materialliste reicht genau.
+- Ablauf (Lukas, 20.10.2026): auf der Karte eine Form zeichnen → die App rendert genau diesen Bereich in 3D → Bereich anklicken, in die 3D-Ansicht → frei durchfliegen wie in Minecraft und sehen, was da steht → erst dort Gebäude platzieren.
 - Abgenommen: noch nichts (Etappe 1 liegt zur Abnahme, Stand 20.10.2026).
-- Nicht gewollt: frei generierte Farmen/Redstone, mitgelieferte Mojang-Texturen, Blau in der Oberfläche, Template-Look, Titelbalken oben links.
+- Nicht gewollt: frei generierte Farmen/Redstone, mitgelieferte Mojang-Texturen, Blau in der Oberfläche, Template-Look, Titelbalken oben links. Gebäude direkt auf der Karte platzieren (Fassung 1/2). Eine 3D-Ansicht, die nur das Gebäude mit etwas Rand zeigt statt des ganzen Bereichs.
 
 ## Regeln, die immer gelten
 - **Funktional und dekorativ trennen.** Farmen und Redstone (Eisenfarm, Trading Hall) entstehen nur aus geprüften Vorlagen, die parametrisiert werden (Ausrichtung, Anzahl Module, Fassade). Spawnfläche, Dorfbewohner-Plätze, Kill-Kammer, Wasserströme bleiben unverändert. Nur dekorative Bauten (Haus, Brücke, Dorf) werden prozedural erzeugt.
@@ -45,3 +46,4 @@ Weltformat: ab 26.1 liegen die Regionen in `dimensions/minecraft/overworld/regio
 ## Verlauf der Fassungen
 - Fassung 1 (20.10.2026): erster Durchstich. Rückmeldung: in der Artifact-Vorschau ließ sich der Weltordner nicht verbinden (Fehler).
 - Fassung 2 (20.10.2026): eingebettet (Artifact) Ordner über Dateiauswahl oder Hineinziehen, Export dort als .zip über den Speichern-Dialog der Plattform. Direkt geöffnet (Pages, lokal) bleibt die dauerhafte Ordner-Verbindung.
+- Rückmeldung zu Fassung 2/3: Ablauf grundsätzlich ändern (siehe Zielkarte „Ablauf“): Bereich zeichnen, Bereich in 3D, frei fliegen, dort platzieren.
