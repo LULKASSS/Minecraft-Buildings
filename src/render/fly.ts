@@ -9,7 +9,8 @@ const SPRINT = 2.2
 export class FlyControls {
   yaw = 0
   pitch = -0.35
-  private keys = new Set<string>()
+  /** gedrückte Tasten, auch wenn der Flug aus ist (die Umsehen-Kamera bewegt sich damit) */
+  readonly keys = new Set<string>()
   private dragging = false
   private lastX = 0
   private lastY = 0
@@ -19,10 +20,10 @@ export class FlyControls {
   constructor(readonly camera: THREE.PerspectiveCamera, private el: HTMLElement) {
     camera.rotation.order = 'YXZ'
     window.addEventListener('keydown', e => {
-      if (!this.enabled || isTyping(e)) return
+      if (isTyping(e) || e.metaKey || e.altKey) return
       if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight', 'KeyQ', 'KeyE'].includes(e.code)) {
         this.keys.add(e.code)
-        if (e.code === 'Space') e.preventDefault()
+        if (e.code === 'Space' && (e.target as HTMLElement | null)?.tagName !== 'BUTTON') e.preventDefault()
       }
     })
     window.addEventListener('keyup', e => this.keys.delete(e.code))
@@ -37,7 +38,7 @@ export class FlyControls {
       }
     })
     el.addEventListener('pointerdown', e => {
-      if (e.button !== 0 || this.locked) return
+      if (!this.enabled || e.button !== 0 || this.locked) return
       this.dragging = true
       this.lastX = e.clientX
       this.lastY = e.clientY
@@ -95,7 +96,7 @@ export class FlyControls {
   }
 }
 
-function isTyping(e: KeyboardEvent): boolean {
+export function isTyping(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement | null
   return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)
 }

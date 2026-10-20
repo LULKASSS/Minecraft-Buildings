@@ -21,7 +21,7 @@ export interface WorldInfo {
   regions: RegionRef[]
 }
 
-export function parseLevel(bytes: Uint8Array): Omit<WorldInfo, 'regionDir' | 'regions'> {
+export function parseLevel(bytes: Uint8Array): Omit<WorldInfo, 'regionDir' | 'regions'> & { lastPlayed: number } {
   const root = NbtFile.read(bytes).root
   const data: NbtCompound = root.hasCompound('Data') ? root.getCompound('Data') : root
   const version = data.hasCompound('Version') ? data.getCompound('Version') : null
@@ -30,6 +30,7 @@ export function parseLevel(bytes: Uint8Array): Omit<WorldInfo, 'regionDir' | 're
     dataVersion: data.getNumber('DataVersion') || version?.getNumber('Id') || 0,
     versionName: version?.getString('Name') ?? '',
     spawn: readSpawn(data),
+    lastPlayed: data.hasNumber('LastPlayed') ? data.getNumber('LastPlayed') : 0,
   }
 }
 

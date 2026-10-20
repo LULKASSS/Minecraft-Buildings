@@ -1,7 +1,7 @@
 // Erzeugt eine kleine Testwelt im 26.x-Format: Hügel, ein See, Sand am Ufer.
 // Für Tests und zum Ausprobieren ohne eigene Welt. Keine echte Welt im Repo.
 
-import { NbtCompound, NbtFile, NbtInt, NbtIntArray, NbtList, NbtLong, NbtLongArray, NbtString } from 'deepslate/nbt'
+import { NbtByte, NbtByteArray, NbtCompound, NbtFile, NbtInt, NbtIntArray, NbtList, NbtLong, NbtLongArray, NbtString } from 'deepslate/nbt'
 import { deflate } from 'pako'
 
 const MIN_SEC = -4
@@ -82,18 +82,19 @@ function stateTag(s: string): NbtCompound {
   return c
 }
 
-export function makeChunk(cx: number, cz: number, block = testBlock, dataVersion = 4786): Uint8Array {
+/** secs: nur diese Abschnitte schreiben (für große Testwelten, die schnell entstehen sollen) */
+export function makeChunk(cx: number, cz: number, block = testBlock, dataVersion = 4786, secs: [number, number] = [MIN_SEC, MIN_SEC + SECTIONS - 1]): Uint8Array {
   const sections: NbtCompound[] = []
   const surface: number[] = []
   for (let z = 0; z < 16; z++)
     for (let x = 0; x < 16; x++) {
       let top = MIN_SEC * 16 - 1
-      for (let y = (MIN_SEC + SECTIONS) * 16 - 1; y >= MIN_SEC * 16; y--) {
+      for (let y = (secs[1] + 1) * 16 - 1; y >= secs[0] * 16; y--) {
         if (block(cx * 16 + x, y, cz * 16 + z) !== 'minecraft:air') { top = y; break }
       }
       surface.push(top + 1 - MIN_SEC * 16)
     }
-  for (let sy = MIN_SEC; sy < MIN_SEC + SECTIONS; sy++) {
+  for (let sy = secs[0]; sy <= secs[1]; sy++) {
     const palette: string[] = []
     const idx: number[] = []
     for (let y = 0; y < 16; y++)
@@ -106,8 +107,12 @@ export function makeChunk(cx: number, cz: number, block = testBlock, dataVersion
         }
     const bs = new NbtCompound().set('palette', new NbtList(palette.map(stateTag), 10))
     if (palette.length > 1) bs.set('data', new NbtLongArray(packAligned(idx, Math.max(4, Math.ceil(Math.log2(palette.length))))))
-    sections.push(new NbtCompound().set('Y', new NbtInt(sy)).set('block_states', bs))
+    sections.push(new NbtCompound().set('Y', new NbtByte(sy)).set('block_states', bs))
   }
+  // wie im Spiel: ein Abschnitt unter und über der Welt nur mit Licht, ohne Blöcke
+  const light = new NbtByteArray(new Array(2048).fill(0))
+  sections.unshift(new NbtCompound().set('Y', new NbtByte(MIN_SEC - 1)).set('SkyLight', light))
+  sections.push(new NbtCompound().set('Y', new NbtByte(MIN_SEC + SECTIONS)).set('SkyLight', light))
   const root = new NbtCompound()
     .set('DataVersion', new NbtInt(dataVersion))
     .set('xPos', new NbtInt(cx))
@@ -150,13 +155,28 @@ export function makeRegion(chunks: { lx: number; lz: number; nbt: Uint8Array; co
   return out
 }
 
-export function makeLevelDat(name = 'Testwelt', dataVersion = 4786): Uint8Array {
+export function makeLevelDat(name = 'Testwelt', dataVersion = 4786, lastPlayed = 1760900000000): Uint8Array {
   const data = new NbtCompound()
     .set('LevelName', new NbtString(name))
     .set('DataVersion', new NbtInt(dataVersion))
     .set('Version', new NbtCompound().set('Name', new NbtString('26.1')).set('Id', new NbtInt(dataVersion)))
     .set('spawn', new NbtCompound().set('pos', new NbtIntArray([8, 70, 8])))
+    .set('LastPlayed', new NbtLong(BigInt(lastPlayed)))
   return new NbtFile('', new NbtCompound().set('Data', data), 'gzip', false, undefined).write()
+}
+
+/** Große Testwelt für Ladeproben: n × n volle Regionen ab 0,0, nur Abschnitte von Y 32 bis 111. */
+export function makeBigWorld(n = 2, name = 'Große Testwelt'): Map<string, Uint8Array> {
+  const files = new Map<string, Uint8Array>()
+  files.set('level.dat', makeLevelDat(name))
+  const dir = 'dimensions/minecraft/overworld/region'
+  for (let rz = 0; rz < n; rz++)
+    for (let rx = 0; rx < n; rx++) {
+      const cs: { lx: number; lz: number; nbt: Uint8Array }[] = []
+      for (let lz = 0; lz < 32; lz++) for (let lx = 0; lx < 32; lx++) cs.push({ lx, lz, nbt: makeChunk(rx * 32 + lx, rz * 32 + lz, testBlock, 4786, [2, 6]) })
+      files.set(`${dir}/r.${rx}.${rz}.mca`, makeRegion(cs))
+    }
+  return files
 }
 
 /** Ganze Testwelt: Pfad → Inhalt. Region 0,0 mit chunks × chunks Chunks, Region -1,0 mit 2×8 Chunks (negative x). */

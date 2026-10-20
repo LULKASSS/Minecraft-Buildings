@@ -22,6 +22,8 @@ export interface Tile {
   heights: Int16Array | null
   inhabited: Float32Array | null
   built: Uint16Array | null
+  lodH: Int16Array | null
+  lodC: Uint8Array | null
   state: 'idle' | 'loading' | 'ready' | 'error'
   /** Farben haben sich geändert: altes Bild bleibt stehen, bis das neue da ist */
   stale: boolean
@@ -32,12 +34,12 @@ export interface Tile {
 
 interface TileReply {
   bitmap: ImageBitmap; png: Blob; trace: ImageBitmap; tracePng: Blob
-  heights: Int16Array; inhabited: Float32Array; built: Uint16Array
+  heights: Int16Array; inhabited: Float32Array; built: Uint16Array; lodH: Int16Array; lodC: Uint8Array
   chunks: number; skipped: { legacy: number; incomplete: number; errors: string[] }
 }
 
 interface CachedTile {
-  modified: number; png: Blob; tracePng: Blob; heights: ArrayBuffer; inhabited: ArrayBuffer; built: ArrayBuffer; legacy: number
+  modified: number; png: Blob; tracePng: Blob; heights: ArrayBuffer; inhabited: ArrayBuffer; built: ArrayBuffer; lodH: ArrayBuffer; lodC: ArrayBuffer; legacy: number
 }
 
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never
@@ -47,7 +49,7 @@ interface Slot { w: Worker; job: Job | null }
 
 const JOB_TIMEOUT = 120_000
 const MAX_BITMAPS = 48 // je 1 MB; weiter entfernte Kacheln werden aus dem PNG neu erzeugt
-const CACHE_VERSION = 2
+const CACHE_VERSION = 3
 
 class Pool {
   private slots: Slot[] = []
@@ -262,6 +264,8 @@ export class WorldSession {
         t.heights = new Int16Array(cached.heights)
         t.inhabited = new Float32Array(cached.inhabited)
         t.built = new Uint16Array(cached.built)
+        t.lodH = new Int16Array(cached.lodH)
+        t.lodC = new Uint8Array(cached.lodC)
         legacy = cached.legacy
       } else {
         const r = await this.pool.run<TileReply>(
@@ -272,11 +276,14 @@ export class WorldSession {
         t.heights = r.heights
         t.inhabited = r.inhabited
         t.built = r.built
+        t.lodH = r.lodH
+        t.lodC = r.lodC
         legacy = r.skipped.legacy
         if (!this.demo)
           void store.put('tiles', cacheKey, {
             modified: file.modified, png: r.png, tracePng: r.tracePng, legacy,
             heights: r.heights.slice().buffer, inhabited: r.inhabited.slice().buffer, built: r.built.slice().buffer,
+            lodH: r.lodH.slice().buffer, lodC: r.lodC.slice().buffer,
           } satisfies CachedTile).catch(() => {})
       }
       if (this.disposed) {
@@ -403,5 +410,5 @@ export class WorldSession {
 }
 
 function blank(rx: number, rz: number): Tile {
-  return { rx, rz, bitmap: null, png: null, trace: null, heights: null, inhabited: null, built: null, state: 'idle', stale: false, tries: 0 }
+  return { rx, rz, bitmap: null, png: null, trace: null, heights: null, inhabited: null, built: null, lodH: null, lodC: null, state: 'idle', stale: false, tries: 0 }
 }

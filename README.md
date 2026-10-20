@@ -1,16 +1,16 @@
 # Basenplaner
 
-Minecraft-Base am Rechner planen: Welt laden, Bauplatz auf der Karte markieren, Bauwerk einsetzen, in 3D mit dem echten Gelände prüfen, Schicht für Schicht nachbauen und als `.litematic` ins Spiel holen.
+Minecraft-Base in 3D planen: den Minecraft-Ordner freigeben, durch die eigene Welt fliegen, Häuser setzen, jedes Haus anklicken und Schicht für Schicht nachbauen, als `.litematic` ins Spiel holen.
 
 Läuft komplett im Browser. Die Welt verlässt den Rechner nicht.
 
 ## Benutzen
-1. In Chrome öffnen, links **Welt-Ordner verbinden** und den Weltordner wählen (`~/Library/Application Support/minecraft/saves/<Welt>`, der Ordner mit `level.dat`). Alternativ ein ZIP der Welt.
-2. Optional **.jar wählen** für echte Texturen: `~/Library/Application Support/minecraft/versions/<Version>/<Version>.jar` (im Dateidialog ⌘⇧G, dann den Pfad einfügen).
-3. Auf der Karte **Bereich aufziehen** (oder `B`, oder Umschalttaste + Ziehen), bis 512 × 512 Blöcke.
-4. **In 3D öffnen**: der ganze Bereich wird geladen. Fliegen wie im Kreativmodus: `WASD`, `Leertaste` hoch, `Shift` runter, `Strg` schneller, Maus ziehen zum Umsehen, Doppelklick fängt die Maus (`Esc` gibt frei).
-5. Links ein Bauwerk wählen, im Gelände an die Stelle klicken (`R` dreht die Vorschau).
-6. Unten Schicht für Schicht durchgehen, **.litematic** speichern und in Litematica auf den angezeigten Ursprung setzen.
+1. In Chrome öffnen, **Minecraft-Ordner auswählen** (Mac: im Dialog ⇧⌘G, `~/Library/Application Support/minecraft`) oder den Ordner hineinziehen. Die App findet die Welten unter `saves` (zuletzt gespielte zuerst) und die Spiel-.jar unter `versions` für die Texturen. Liegt dort keine .jar, lädt ein Knopf die passende direkt von Mojang (einmal, bleibt im Browser).
+2. Die Welt öffnet sofort in 3D, über der Stelle, an der ihr am meisten Zeit verbracht habt. **Ziehen** = umsehen, **rechts ziehen** = verschieben, **Rad** = näher/weiter, `WASD` = bewegen, **Doppelklick** = hinfliegen.
+3. **F** schaltet in den Flugmodus mit Fadenkreuz (`WASD`, `Leertaste`/`Shift` hoch/runter, `Strg` schneller). **F** oder `Esc` zurück.
+4. Links ein Bauwerk wählen, **In die Welt setzen**, ins Gelände klicken (`R` dreht die Vorschau).
+5. Ein gesetztes Haus **anklicken**: unten die Anleitung Schicht für Schicht mit Materialliste, links Drehen, Verschieben und **.litematic** zum Speichern (in Litematica auf den angezeigten Ursprung setzen).
+6. Rechts unten die Karte zum Hinspringen (`M` = groß). Lila: dort ist gebaut, zart: dort wart ihr.
 
 Weitere Tasten: Pfeile verschieben das gewählte Bauwerk, Bild hoch/runter die Höhe, `[` und `]` wechseln die Ebene, `P` spielt ab.
 
@@ -22,4 +22,4 @@ npm test
 ```
 Details zu Aufbau und Regeln in `CLAUDE.md`.
 
-Minecraft-Texturen und -Modelle gehören Mojang und sind nicht Teil dieses Repos. Die App liest sie aus der eigenen Spieldatei.
+Minecraft-Texturen und -Modelle gehören Mojang und sind nicht Teil dieses Repos. Die App liest sie zur Laufzeit aus der eigenen Spieldatei oder lädt sie auf Knopfdruck direkt von Mojang in den Browser.

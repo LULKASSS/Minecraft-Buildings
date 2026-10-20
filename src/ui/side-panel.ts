@@ -1,4 +1,4 @@
-// Linke Spalte: Welt, Bereiche, und in der 3D-Ansicht: bauen (Typ, Drehen, Verschieben, Export).
+// Schwebendes Panel über der 3D-Welt: bauen (Typ, Stil, Varianten), gewähltes Bauwerk, Orte, Welt.
 
 import { boundsOf, type Placement } from '../blueprint/placement'
 import { blueprintMaterials } from '../blueprint/materials'
@@ -11,31 +11,23 @@ import type { TexturedMesher } from '../render/textured'
 import { survivalCost } from '../style/blocks'
 import { customPalettes, palettesFor, type Palette, type Role } from '../style/palettes'
 import {
-  changePlacement, choiceSource, collisions, deleteArea, deletePlacement, newSeeds, nudgePlacement, openArea, placedOf, placementsIn,
-  renameArea, renamePlacement, rotatePlacement, S, selectedArea, selectedPlacement, update, type Area,
+  changePlacement, choiceSource, collisions, deletePlacement, newSeeds, nudgePlacement, placedOf,
+  renamePlacement, rotatePlacement, S, selectedPlacement, update,
 } from '../app/state'
 import { coord, esc, num } from '../ui/format'
 import { I } from './icons'
 import { placeThumb } from './guide'
-import { canConnectFolder } from '../app/env'
 import { duration } from '../map/map-view'
 
 export interface SideActions {
-  connectFolder(): void
-  reopenFolder(): void
-  openZip(): void
-  uploadFolder(): void
-  demo(): void
   closeWorld(): void
   loadTextures(file?: File): void
+  mojangTextures(): void
   exportLitematic(): void
   exportSchem(): void
-  openArea(id: string): void
-  drawArea(): void
   startPlacing(type: string): void
   cancelPlacing(): void
   toggleTheme(): void
-  focusArea(id: string): void
   focusPoint(x: number, z: number): void
   focusPlacement(id: string): void
   learnPalette(): void
@@ -47,19 +39,28 @@ export interface SideActions {
   versionName(dataVersion: number): string
 }
 
+let lastMode = ''
+
 export function renderSide(el: HTMLElement, a: SideActions): void {
   // Während getippt wird, nicht neu zeichnen (sonst springt der Cursor)
   if (el.contains(document.activeElement) && document.activeElement?.tagName === 'INPUT') return
-  const scroll = el.querySelector('.side-scroll')?.scrollTop ?? 0
-  const body = !S.session ? '' : S.view === '3d' && openArea() ? buildBlocks(openArea()!, a) : areaBlocks() + traceBlock()
+  el.hidden = !S.session
+  if (!S.session) return
+  const p = selectedPlacement()
+  // anderes Bauwerk oder zurück zum Bauen: oben anfangen, sonst die Stelle halten
+  const mode = p?.id ?? 'bauen'
+  const scroll = mode === lastMode ? el.querySelector('.side-scroll')?.scrollTop ?? 0 : 0
+  lastMode = mode
   el.innerHTML = `
-    <div class="side-scroll">
-      ${worldBlock()}
-      ${body}
+    <div class="panel-head">
+      <span class="block-title">${p ? 'Bauwerk' : 'Bauen'}</span>
+      <button class="btn ghost small icon" data-act="collapse" title="Panel ein-/ausklappen" aria-expanded="${!S.panelCollapsed}">${S.panelCollapsed ? I.down : I.up}</button>
     </div>
-    <div class="side-foot">
-      <span class="small muted">Etappe 1 · Durchstich</span>
-      <button class="btn ghost small icon" data-act="theme" title="Hell / Dunkel">${isDark() ? I.sun : I.moon}</button>
+    <div class="side-scroll" ${S.panelCollapsed ? 'hidden' : ''}>
+      ${p ? selectedBlocks(p, a) : buildBlock(a)}
+      ${placementsBlock()}
+      ${traceBlock()}
+      ${worldBlock()}
     </div>`
   el.querySelector('.side-scroll')!.scrollTop = scroll
   bind(el, a)
@@ -70,41 +71,23 @@ function versionGuess(): string {
   return S.session?.info.versionName || '<Version>'
 }
 
-function isDark(): boolean {
-  const t = document.documentElement.dataset.theme
-  return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches)
-}
-
 function worldBlock(): string {
-  const s = S.session
-  if (!s) {
-    const hasPicker = canConnectFolder()
-    return `
-    <div class="block">
-      <div class="block-head"><span class="block-title">Welt</span></div>
-      <div class="stack">
-        ${S.savedFolder && hasPicker ? `<button class="btn primary" data-act="reopen">${I.folder}Weiter mit „${esc(S.savedFolder)}“</button>` : ''}
-        ${hasPicker ? `<button class="btn ${S.savedFolder ? '' : 'primary'}" data-act="folder">${I.folder}Welt-Ordner verbinden</button>` : `<button class="btn primary" data-act="upload">${I.folder}Welt-Ordner wählen</button>`}
-        <button class="btn" data-act="zip">${I.zip}ZIP wählen</button>
-        <p class="note muted" style="margin:4px 0 0">Unter <b>saves</b> im Minecraft-Ordner, der Ordner mit <b>level.dat</b>. Geht auch per Hineinziehen. Die Welt bleibt auf diesem Rechner.</p>
-        <div><button class="linkish" data-act="demo">Mit Testwelt ausprobieren</button></div>
-      </div>
-    </div>`
-  }
+  const s = S.session!
   const busy = S.busy
   return `
     <div class="block">
       <div class="block-head"><span class="block-title">Welt</span><button class="btn ghost small" data-act="close">Wechseln</button></div>
-      <div class="world-name">${esc(s.info.name)}</div>
+      <div class="world-name small-name">${esc(s.info.name)}</div>
       <div class="status-line" style="margin-top:4px">
         <span class="dot ${busy ? 'busy' : 'on'}"></span>${busy ? esc(busy) : `${esc(s.info.versionName || 'Version ?')} · ${num(s.info.regions.length)} Regionen${s.demo ? ' · Testwelt' : ''}`}
       </div>
       ${mapProgress()}
       <div class="row" style="margin-top:12px">
-        <span class="small muted grow">${S.textures === 'ready' ? 'Texturen aus deiner .jar' : S.textures === 'loading' ? 'Texturen werden gelesen …' : 'Einfarbig'}</span>
-        ${S.textures !== 'ready' ? `<button class="btn small" data-act="textures" ${S.textures === 'loading' ? 'disabled' : ''}>.jar wählen</button>` : ''}
+        <span class="small muted grow">${S.textures === 'ready' ? `Texturen aus ${esc(S.texturesFrom ?? 'der .jar')}` : S.textures === 'loading' ? esc(S.texturesFrom ?? 'Texturen werden gelesen …') : 'Einfarbig'}</span>
+        ${S.textures === 'none' ? `<button class="btn small" data-act="textures">.jar wählen</button>` : ''}
       </div>
-      ${S.textures === 'none' ? `<p class="note muted" style="margin:6px 0 0">Texturen aus <b>minecraft/versions/${esc(versionGuess())}/${esc(versionGuess())}.jar</b>, oder die Datei auf die Karte ziehen.</p>` : ''}
+      ${S.textures === 'none' ? `<p class="note muted" style="margin:6px 0 8px">Im Minecraft-Ordner liegt keine passende .jar (der Launcher lädt sie erst beim ersten Spielen).</p>
+        <button class="btn accent" style="width:100%" data-act="mojang">${I.download}Texturen von Mojang laden (${esc(versionGuess())}, ca. 40 MB)</button>` : ''}
     </div>`
 }
 
@@ -126,64 +109,30 @@ function traceBlock(): string {
       <span class="item-sub">${duration(h.hours * 3600)} in der Nähe${h.built ? ` · ${num(h.built)} gebaute Stellen` : ''}</span></span></button>`).join('')
   return `
     <div class="block">
-      <div class="block-head"><span class="block-title">Spuren</span>
+      <div class="block-head"><span class="block-title">Hier wart ihr am meisten</span>
         <button class="btn ghost small" data-act="traces" aria-pressed="${S.traces}">${S.traces ? 'Ausblenden' : 'Zeigen'}</button></div>
       ${!S.traces ? `<p class="note muted" style="margin:0">Zeigt auf der Karte, wo ihr wart und wo gebaut ist.</p>`
-        : items ? `<div class="list">${items}</div><p class="note muted" style="margin:8px 0 0">Kräftig: oben liegt Gebautes (Dörfer zählen mit). Zart: dort wart ihr, je länger, desto dichter.</p>`
+        : items ? `<div class="list">${items}</div><p class="note muted" style="margin:8px 0 0">Auf der Karte: kräftig = oben liegt Gebautes (Dörfer zählen mit), zart = dort wart ihr.</p>`
         : `<p class="note muted" style="margin:0">${p.done < p.total ? 'Wird beim Laden der Karte gesammelt …' : 'Noch keine Orte mit viel Spielzeit gefunden.'}</p>`}
     </div>`
 }
 
-function size(a: Area): string {
-  return `${a.x1 - a.x0 + 1} × ${a.z1 - a.z0 + 1}`
+/** Bauen: was als Nächstes gesetzt wird. */
+function buildBlock(a: SideActions): string {
+  return `<div class="block">${chooser(a)}</div>`
 }
 
-/** Karte: Bereiche aufziehen, auswählen, in 3D öffnen. */
-function areaBlocks(): string {
-  const sel = selectedArea()
-  const items = S.project.areas.map(ar => {
-    const cur = S.sel?.kind === 'area' && S.sel.id === ar.id
-    const n = placementsIn(ar.id).length
-    return `<button class="item" data-area="${ar.id}" aria-current="${cur}">
-      <span class="sq outline"></span><span class="grow"><span class="item-name" style="display:block">${esc(ar.name)}</span>
-      <span class="item-sub">${size(ar)} · ${n === 0 ? 'noch leer' : n === 1 ? '1 Bauwerk' : `${n} Bauwerke`}</span></span></button>`
-  }).join('')
-  return `
-    <div class="block">
-      <div class="block-head"><span class="block-title">Bereiche</span><span class="block-meta">${S.project.areas.length || ''}</span></div>
-      ${items ? `<div class="list">${items}</div>` : ''}
-      <button class="btn ${items ? '' : 'primary'}" style="width:100%;margin-top:${items ? 10 : 0}px" data-act="draw">${I.rect}Bereich aufziehen</button>
-      ${sel ? `
-        <div class="stack" style="margin-top:14px">
-          <input class="field" id="area-name" data-rename-area="${sel.id}" value="${esc(sel.name)}" aria-label="Name des Bereichs" />
-          <div class="small muted">X ${coord(sel.x0)} bis ${coord(sel.x1)} · Z ${coord(sel.z0)} bis ${coord(sel.z1)}</div>
-          <button class="btn accent" data-act="open-area">${I.cube}In 3D öffnen</button>
-          <div class="row"><span class="grow"></span><button class="btn small danger" data-act="del-area">${I.trash}Bereich löschen</button></div>
-        </div>` : ''}
-    </div>`
-}
-
-/** 3D: im offenen Bereich bauen. */
-function buildBlocks(area: Area, a: SideActions): string {
+/** Alle gesetzten Bauwerke: Klick fliegt hin und zeigt die Anleitung. */
+function placementsBlock(): string {
+  const list = S.project.placements
+  if (!list.length) return ''
   const p = selectedPlacement()
-  const list = placementsIn(area.id)
   const hits = collisions()
-  const items = list.map(q => {
-    const cur = p?.id === q.id
-    return `<button class="item" data-placement="${q.id}" aria-current="${cur}"><span class="sq"></span>
+  const items = list.map(q => `<button class="item" data-placement="${q.id}" aria-current="${p?.id === q.id}"><span class="sq"></span>
       <span class="grow"><span class="item-name" style="display:block">${esc(q.name)}</span>
       <span class="item-sub">${coord(q.pos[0])} ${coord(q.pos[1])} ${coord(q.pos[2])}</span></span>
-      ${hits.has(q.id) ? '<span class="warn">überschneidet</span>' : ''}</button>`
-  }).join('')
-
-  let html = `
-    <div class="block">
-      <div class="block-head"><span class="block-title">${esc(area.name)}</span><span class="block-meta">${size(area)}</span></div>
-      ${chooser(a)}
-    </div>`
-  if (items) html += `<div class="block"><div class="block-head"><span class="block-title">Bauwerke hier</span><span class="block-meta">${list.length}</span></div><div class="list">${items}</div></div>`
-  if (!p || p.areaId !== area.id) return html
-  return html + selectedBlocks(p, a)
+      ${hits.has(q.id) ? '<span class="warn">überschneidet</span>' : ''}</button>`).join('')
+  return `<div class="block"><div class="block-head"><span class="block-title">Eure Bauwerke</span><span class="block-meta">${list.length}</span></div><div class="list">${items}</div></div>`
 }
 
 const b = () => S.build
@@ -200,7 +149,7 @@ function chooser(a: SideActions): string {
   if (c.cat === 'gebaeude' || (c.cat === 'vorlage' && c.facade)) {
     html += `<div class="sub">Stil</div><div class="chips">${STYLES.map(st => chip('data-style', st.id, st.label, c.style === st.id)).join('')}</div>`
     html += `<div class="sub">Palette</div><div class="pals">${palettesFor(c.style, customPalettes()).map(pal => paletteRow(pal, c.palette === pal.id, a)).join('')}</div>
-      <button class="linkish small" data-act="learn">Palette aus diesem Bereich lernen</button>`
+      <button class="linkish small" data-act="learn">Palette aus der Umgebung lernen</button>`
   }
   if (c.cat === 'natur' && c.type === 'baum') html += `<div class="sub">Holzart</div><div class="chips">${SPECIES.map(sp => chip('data-species', sp.id, sp.label, c.species === sp.id)).join('')}</div>`
   if (c.cat === 'natur' && c.type === 'pinsel') html += `<div class="sub">Mischung</div><div class="chips">${MIXES.map(m => chip('data-mix', m.id, m.label, c.mix === m.id)).join('')}</div>`
@@ -212,9 +161,9 @@ function chooser(a: SideActions): string {
   const entry = CATALOG.find(e => e.id === c.type)
   if (entry?.seeded) html += variantsBlock(a)
   html += S.placing
-    ? `<p class="note" style="margin:12px 0 8px"><b>Klick</b> setzt · <b>R</b> dreht · <b>Esc</b> bricht ab</p>
+    ? `<p class="note" style="margin:12px 0 8px"><b>Klick</b> ins Gelände setzt · <b>R</b> dreht · <b>Esc</b> bricht ab</p>
        <button class="btn" style="width:100%" data-act="cancel-place">Abbrechen</button>`
-    : `<button class="btn accent" style="width:100%;margin-top:12px" data-act="start-place">${I.cube}Platzieren</button>`
+    : `<button class="btn accent" style="width:100%;margin-top:12px" data-act="start-place">${I.cube}In die Welt setzen</button>`
   return html
 }
 
@@ -292,7 +241,7 @@ function selectedBlocks(p: Placement, a: SideActions): string {
   }
   return `
     <div class="block">
-      <div class="block-head"><span class="block-title">Ausgewählt</span><span class="block-meta">${w} × ${d} · ${h} hoch</span></div>
+      <div class="block-head"><button class="linkish small" data-act="deselect">← Zurück zum Bauen</button><span class="block-meta">${w} × ${d} · ${h} hoch</span></div>
       <div class="stack">
         <input class="field" id="placement-name" data-rename-placement="${p.id}" value="${esc(p.name)}" aria-label="Name des Bauwerks" />
         <div class="row wrap">
@@ -335,23 +284,21 @@ function selectedBlocks(p: Placement, a: SideActions): string {
 function bind(el: HTMLElement, a: SideActions): void {
   el.querySelectorAll<HTMLElement>('[data-act]').forEach(b => b.addEventListener('click', () => {
     const p = selectedPlacement()
-    const ar = selectedArea()
     switch (b.dataset.act) {
-      case 'folder': return a.connectFolder()
-      case 'reopen': return a.reopenFolder()
-      case 'zip': return a.openZip()
-      case 'upload': return a.uploadFolder()
-      case 'demo': return a.demo()
       case 'close': return a.closeWorld()
       case 'textures': return a.loadTextures()
+      case 'mojang': return a.mojangTextures()
+      case 'collapse':
+        S.panelCollapsed = !S.panelCollapsed
+        return update()
+      case 'deselect':
+        S.sel = null
+        return update()
       case 'theme': return a.toggleTheme()
-      case 'draw': return a.drawArea()
       case 'traces':
         S.traces = !S.traces
         try { localStorage.setItem('traces', S.traces ? '1' : '0') } catch { /* egal */ }
         return update()
-      case 'open-area': return ar && a.openArea(ar.id)
-      case 'del-area': return ar && deleteArea(ar.id)
       case 'cancel-place': return a.cancelPlacing()
       case 'start-place': return a.startPlacing(S.build.type)
       case 'reroll':
@@ -424,14 +371,6 @@ function bind(el: HTMLElement, a: SideActions): void {
   })
   const thumb = el.querySelector<HTMLElement>('#cat-seg')
   if (thumb) placeThumb(thumb)
-  el.querySelectorAll<HTMLElement>('[data-area]').forEach(b => {
-    b.addEventListener('click', () => {
-      S.sel = { kind: 'area', id: b.dataset.area! }
-      a.focusArea(b.dataset.area!)
-      update()
-    })
-    b.addEventListener('dblclick', () => a.openArea(b.dataset.area!))
-  })
   el.querySelectorAll<HTMLElement>('[data-placement]').forEach(b => b.addEventListener('click', () => {
     S.sel = { kind: 'placement', id: b.dataset.placement! }
     S.guide.layer = null
@@ -452,6 +391,5 @@ function bind(el: HTMLElement, a: SideActions): void {
     })
     input.addEventListener('blur', () => fn(input.getAttribute(attr)!, input.value))
   }
-  commit(el.querySelector<HTMLInputElement>('[data-rename-area]'), renameArea, 'data-rename-area')
   commit(el.querySelector<HTMLInputElement>('[data-rename-placement]'), renamePlacement, 'data-rename-placement')
 }

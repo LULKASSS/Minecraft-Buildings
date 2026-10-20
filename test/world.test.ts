@@ -1,13 +1,14 @@
 import { BlobWriter, Uint8ArrayReader, ZipWriter } from '@zip.js/zip.js'
 import { describe, expect, it } from 'vitest'
 import { areaGet, readArea, UNDERGROUND } from '../src/world/area'
-import { blockAt, decodeChunk } from '../src/world/chunk'
+import { blockAt, decodeChunk, heightmapBits } from '../src/world/chunk'
 import { openWorld, parseLevel } from '../src/world/level'
 import { readChunkBytes, readHeader } from '../src/world/region'
 import { findWorldRoot, UploadSource, ZipSource, type WorldSource } from '../src/world/source'
 import { renderTile, TILE, TRACE } from '../src/world/tile'
 import { findHotspots } from '../src/world/traces'
-import { makeWorld, testBlock, WATER_LEVEL } from '../src/world/demo-world'
+import { makeLevelDat, makeWorld, testBlock, WATER_LEVEL } from '../src/world/demo-world'
+import { compareVersions, dirFromFiles, DirSource, pickJar, scanFolder } from '../src/world/minecraft'
 
 const world = makeWorld()
 
@@ -36,7 +37,7 @@ const regionBlob = (name: string) => new Blob([world.get(`dimensions/minecraft/o
 describe('level.dat', () => {
   it('liest Name, Datenversion und Spawn im 26.x-Format', () => {
     const l = parseLevel(world.get('level.dat')!)
-    expect(l).toEqual({ name: 'Testwelt', dataVersion: 4786, versionName: '26.1', spawn: [8, 70, 8] })
+    expect(l).toEqual({ name: 'Testwelt', dataVersion: 4786, versionName: '26.1', spawn: [8, 70, 8], lastPlayed: 1760900000000 })
   })
   it('findet den neuen Region-Ordner', async () => {
     const w = await openWorld(new MapSource(world))
@@ -158,5 +159,46 @@ describe('Spuren', () => {
     // Spuren-Ebene: Platz kräftig, Rest höchstens zart
     const o = ((105 >> 2) + (105 >> 2) * TRACE) * 4
     expect(t.trace[o + 3]).toBe(230)
+  })
+})
+
+describe('Minecraft-Ordner', () => {
+  const file = (path: string, data: Uint8Array | string = new Uint8Array(1)) => ({ path, file: new File([data as BlobPart], path.split('/').pop()!) })
+  const mc = () => {
+    const list = [file('minecraft/options.txt', 'x')]
+    for (const [p, d] of world) list.push(file(`minecraft/saves/Alt/${p}`, p === 'level.dat' ? makeLevelDat('Alte Welt', 4671, 1000) : d))
+    for (const [p, d] of world) list.push(file(`minecraft/saves/Realm/${p}`, p === 'level.dat' ? makeLevelDat('Realm', 4786, 2000) : d))
+    list.push(file('minecraft/versions/26.1/26.1.json', '{}'), file('minecraft/versions/26.1/26.1.jar'))
+    list.push(file('minecraft/versions/26.3/26.3.json', '{}')) // ohne .jar, wie bei Lukas
+    list.push(file('minecraft/versions/fabric-loader-0.17-26.3/fabric-loader-0.17-26.3.jar'))
+    return dirFromFiles(list)
+  }
+  it('findet Welten (zuletzt gespielte zuerst) und Versionen', async () => {
+    const s = await scanFolder(mc())
+    expect(s.kind).toBe('minecraft')
+    expect(s.worlds.map(w => w.name)).toEqual(['Realm', 'Alte Welt'])
+    expect(s.versions.map(v => v.version).sort()).toEqual(['26.1', '26.3', 'fabric-loader-0.17-26.3'])
+  })
+  it('nimmt die .jar der Weltversion, sonst die neueste Vanilla-Version, nie Fabric', async () => {
+    const s = await scanFolder(mc())
+    expect(pickJar(s.versions, '26.1')?.version).toBe('26.1')
+    expect(pickJar(s.versions, '26.3')?.version).toBe('26.1') // 26.3 hat keine .jar, Fabric zählt nicht
+    expect(compareVersions('26.3', '26.1')).toBeLessThan(0)
+    expect(compareVersions('1.21.11', '26.1')).toBeGreaterThan(0)
+  })
+  it('liest eine Welt aus dem Ordner wie aus der Datei', async () => {
+    const s = await scanFolder(mc())
+    const w = await openWorld(new DirSource(s.worlds[0].dir))
+    expect(w.name).toBe('Realm')
+    expect(w.regions).toHaveLength(2)
+  })
+  it('erkennt auch einen einzelnen Weltordner', async () => {
+    const s = await scanFolder(dirFromFiles([...world].map(([p, d]) => file(`Meine Welt/${p}`, d))))
+    expect(s.kind).toBe('world')
+    expect(s.worlds).toHaveLength(1)
+  })
+  it('Heightmap-Bitbreite aus der Zahl der Longs (384 Blöcke hoch → 9 Bit)', () => {
+    expect(heightmapBits(37)).toBe(9)
+    expect(heightmapBits(32)).toBe(8)
   })
 })

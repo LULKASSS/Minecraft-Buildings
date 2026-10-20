@@ -24,5 +24,10 @@ export const I = {
   target: svg('<circle cx="8" cy="8" r="4.5"/><path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3"/>'),
   download: svg('<path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/>'),
   rect: svg('<rect x="2.5" y="3.5" width="11" height="9" rx="1" stroke-dasharray="2.2 1.6"/>'),
+  fly: svg('<path d="M2 9.5 14 3l-3.5 11-2.5-4.5z"/><path d="m8 9.5 6-6.5"/>'),
+  home: svg('<path d="M2.5 7.5 8 3l5.5 4.5"/><path d="M4 6.5V13h8V6.5"/>'),
+  expand: svg('<path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5 9 7M2.5 13.5 7 9"/>'),
+  shrink: svg('<path d="M13 7H9V3M3 9h4v4M9 7l4.5-4.5M7 9l-4.5 4.5"/>'),
+  close: svg('<path d="m4 4 8 8M12 4l-8 8"/>'),
   cube: svg('<path d="M8 1.8 13.5 5v6L8 14.2 2.5 11V5z"/><path d="M2.5 5 8 8.2 13.5 5M8 8.2v6"/>'),
 }

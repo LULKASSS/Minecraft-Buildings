@@ -1,23 +1,27 @@
 import './ui/styles.css'
 import type { Vec3 } from './blueprint/blueprint'
-import { addPalette, loadProject, nudgePlacement, placedOf, rotatePlacement, S, selectedArea, selectedPlacement, subscribe, toast, update } from './app/state'
-import { AreaView } from './app/area-view'
+import { addPalette, loadProject, nudgePlacement, placedOf, rotatePlacement, S, selectedPlacement, subscribe, toast, update } from './app/state'
+import { WorldView } from './app/world-view'
 import * as store from './app/store'
 import { WorldSession } from './app/world-session'
 import { writeLitematic } from './export/litematic'
 import { writeSchem } from './export/schem'
 import { MapView } from './map/map-view'
 import { loadTextures } from './render/textures-loader'
+import { cachedJar, fetchJar } from './render/mojang'
 import { coord } from './ui/format'
-import { placeThumb, play, renderGuide, step, stop } from './ui/guide'
+import { play, renderGuide, step, stop } from './ui/guide'
 import { I } from './ui/icons'
 import { renderSide, type SideActions } from './ui/side-panel'
 import { learnPalette } from './style/learn'
 import { importTemplate, loadTemplates, removeTemplate, versionName } from './app/templates-store'
 import { fallbackColor } from './render/block-colors'
 import { makeWorld } from './world/demo-world'
-import { filesFromDrop, FolderSource, UploadSource, ZipSource, type WorldSource } from './world/source'
+import { ZipSource, type WorldSource } from './world/source'
+import { dirFromEntry, dirFromFiles, dirFromHandle, DirSource, pickJar, scanFolder, type Dir, type Scan, type WorldEntry } from './world/minecraft'
 import { canConnectFolder, hostDownloads, inFrame } from './app/env'
+import { isTyping } from './render/fly'
+import { esc } from './ui/format'
 import { BlobWriter, Uint8ArrayReader, ZipWriter } from '@zip.js/zip.js'
 
 const $ = (id: string) => document.getElementById(id)!
@@ -28,8 +32,8 @@ function applyTheme(): void {
   const t = S.theme
   if (t === 'system') delete document.documentElement.dataset.theme
   else document.documentElement.dataset.theme = t
-  map.themeChanged()
-  view3d?.scene.applyTheme()
+  mini.themeChanged()
+  view3d.scene.applyTheme()
 }
 
 try {
@@ -38,55 +42,32 @@ try {
   if (localStorage.getItem('traces') === '0') S.traces = false
 } catch { /* privat */ }
 
-// ---------- Ansichten ----------
+// ---------- 3D und Karte ----------
 
-const map = new MapView($('map'), $('readout'))
-map.onOpen3d = id => actions.openArea(id)
-applyTheme()
-
-const mapTools = document.createElement('div')
-mapTools.className = 'map-tools'
-mapTools.innerHTML = `
-  <button class="btn icon" data-z="in" title="Hineinzoomen">${I.plus}</button>
-  <button class="btn icon" data-z="out" title="Herauszoomen">${I.minus}</button>
-  <button class="btn icon" data-z="spawn" title="Zum Spawn">${I.target}</button>`
-const drawBtn = document.createElement('button')
-drawBtn.className = 'btn map-draw'
-drawBtn.innerHTML = `${I.rect}Bereich aufziehen`
-drawBtn.title = 'Rechteck mit gedrückter Maus aufziehen (oder Umschalttaste + Ziehen)'
-drawBtn.addEventListener('click', () => actions.drawArea())
-$('map').appendChild(drawBtn)
-$('map').appendChild(mapTools)
-mapTools.addEventListener('click', e => {
-  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-z]')
-  if (!b) return
-  if (b.dataset.z === 'in') map.zoomBy(1.6)
-  if (b.dataset.z === 'out') map.zoomBy(1 / 1.6)
-  if (b.dataset.z === 'spawn') {
-    const sp = S.session?.info.spawn
-    if (sp) map.focus(sp[0], sp[2], 2)
-  }
-})
-
-function setView(v: 'map' | '3d'): void {
-  if (v === '3d') {
-    const id = S.openArea ?? selectedArea()?.id ?? S.project.areas[0]?.id
-    if (!id) {
-      toast('Erst auf der Karte einen Bereich aufziehen.')
-      return
-    }
-    return actions.openArea(id)
-  }
-  if (document.pointerLockElement) document.exitPointerLock()
-  S.placing = null
-  S.view = 'map'
-  update()
+const view3d = new WorldView($('three'))
+const mini = new MapView($('mini-map'), $('mini-readout'))
+mini.onJump = (x, z) => {
+  view3d.jumpTo(x, z)
+  if (S.bigMap) setBigMap(false)
+}
+view3d.onCamera = () => {
+  const [x, , z] = view3d.scene.focusWorld()
+  mini.setCamera(x, z, view3d.scene.heading())
+}
+view3d.onAimText = html => ($('status').innerHTML = html)
+let groundLoading = 0
+view3d.onProgress = n => {
+  if (n === groundLoading) return
+  groundLoading = n
+  renderStatusChip()
 }
 
-$('switch').addEventListener('click', e => {
-  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-view]')
-  if (b) setView(b.dataset.view as 'map' | '3d')
-})
+function setBigMap(on: boolean): void {
+  S.bigMap = on
+  mini.setBig(on)
+  update()
+}
+$('mini-toggle').addEventListener('click', () => setBigMap(!S.bigMap))
 
 // ---------- Welt öffnen ----------
 
@@ -104,35 +85,86 @@ class MemorySource implements WorldSource {
   }
 }
 
+/** Ergebnis des zuletzt freigegebenen Ordners: Welten zur Auswahl und Spielversionen für die Texturen. */
+let scan: Scan | null = null
+let choosing = false
+
 async function openSession(src: WorldSource, demo = false): Promise<void> {
   S.busy = 'Welt wird gelesen …'
   update()
   try {
     const session = await WorldSession.open(src, demo)
     S.session?.dispose()
+    view3d.close()
     S.session = session
+    choosing = false
     const told = new Set<string>()
     session.onTile = t => {
-      map.invalidate()
-      // jede Meldung nur einmal, sonst stapeln sich beim Hintergrund-Laden die Hinweise
+      mini.invalidate()
+      view3d.tileChanged(t.rx, t.rz)
+      // jede Meldung nur einmal, sonst stapeln sich beim Laden im Hintergrund die Hinweise
       const msg = t.state === 'error' ? `Region ${t.rx}, ${t.rz}: ${t.error}` : t.error
       if (msg && !told.has(msg)) {
         told.add(msg)
         toast(msg, t.state === 'error')
       }
     }
-    session.onProgress = () => update()
+    session.onProgress = () => {
+      // sobald alles gelesen ist: einmal zur Base, falls man sich noch nicht selbst bewegt hat
+      const p = session.progress()
+      const spot = session.hotspots()[0]
+      if (p.done >= p.total && spot && view3d.maybeGoHome(spot.x, spot.z)) toast('Zu eurer Base gesprungen: dort wart ihr am längsten.')
+      update()
+    }
     if (texturesCache) session.setColors(texturesCache.mapColors, texturesCache.id)
     await loadProject(session.key, session.info.name, session.info.dataVersion)
-    view3d?.close()
-    S.view = 'map'
-    map.sync()
+    S.busy = null
+    update()
+    view3d.open(session)
+    if (!texturesCache && !demo) void autoTextures(session.info.versionName)
   } catch (e) {
     toast(String((e as Error).message ?? e), true)
   } finally {
     S.busy = null
     update()
   }
+}
+
+/** Texturen ohne Zutun: .jar aus versions/, sonst eine früher von Mojang geladene. */
+async function autoTextures(version: string): Promise<void> {
+  const local = scan ? pickJar(scan.versions, version) : null
+  if (local?.jar) return useJar(local.jar, `versions/${local.version}/${local.version}.jar`)
+  const cached = version ? await cachedJar(version) : null
+  if (cached) return useJar(cached, `Minecraft ${version} (von Mojang, gespeichert)`)
+}
+
+async function openFolder(root: Dir, kind: WorldSource['kind'], lastWorld?: string | null): Promise<void> {
+  S.busy = 'Ordner wird durchsucht …'
+  update()
+  try {
+    scan = await scanFolder(root)
+  } catch (e) {
+    S.busy = null
+    toast(String((e as Error).message ?? e), true)
+    return update()
+  }
+  S.busy = null
+  if (!scan.worlds.length) {
+    toast(scan.kind === 'minecraft' ? 'Im Ordner „saves“ liegt keine Welt.' : 'Keine Welt gefunden (keine level.dat). Bitte den Minecraft-Ordner oder einen Weltordner wählen.', true)
+    return update()
+  }
+  const again = lastWorld ? scan.worlds.find(w => w.folder === lastWorld) : null
+  if (scan.worlds.length === 1 || again) return openWorldEntry(again ?? scan.worlds[0], kind)
+  choosing = true
+  update()
+  pendingKind = kind
+}
+
+let pendingKind: WorldSource['kind'] = 'folder'
+
+function openWorldEntry(w: WorldEntry, kind: WorldSource['kind'] = pendingKind): Promise<void> {
+  try { localStorage.setItem('lastWorld', w.folder) } catch { /* privat */ }
+  return openSession(new DirSource(w.dir, kind))
 }
 
 function pickFile(accept: string, dir = false): Promise<File[]> {
@@ -149,74 +181,109 @@ function pickFile(accept: string, dir = false): Promise<File[]> {
 type DirPicker = (o?: { id?: string; mode?: 'read' | 'readwrite' }) => Promise<FileSystemDirectoryHandle>
 type PermHandle = FileSystemDirectoryHandle & { requestPermission(o: { mode: 'read' }): Promise<PermissionState> }
 
-const actions: SideActions = {
-  async connectFolder() {
+const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
+
+function lastWorld(): string | null {
+  try { return localStorage.getItem('lastWorld') } catch { return null }
+}
+
+const start = {
+  async connect() {
     try {
-      const handle = await (window as unknown as { showDirectoryPicker: DirPicker }).showDirectoryPicker({ id: 'mc-world', mode: 'read' })
+      const handle = await (window as unknown as { showDirectoryPicker: DirPicker }).showDirectoryPicker({ id: 'minecraft', mode: 'read' })
       await store.put('kv', 'folder', handle)
       S.savedFolder = handle.name
-      await openSession(new FolderSource(handle))
+      await openFolder(dirFromHandle(handle), 'folder')
     } catch (e) {
-      if ((e as Error).name !== 'AbortError') toast(String((e as Error).message ?? e), true)
+      const err = e as Error
+      if (err.name === 'AbortError') return
+      // Chrome sperrt manche Systemordner für die Freigabe: dann geht Auswählen oder Hineinziehen
+      toast(err.name === 'SecurityError' || /system/i.test(err.message) ? 'Diesen Ordner gibt Chrome nicht frei. Bitte mit „Ordner auswählen“ oder per Hineinziehen.' : String(err.message ?? err), true)
     }
   },
-  async reopenFolder() {
+  async reopen() {
     const handle = await store.get<PermHandle>('kv', 'folder')
-    if (!handle) return actions.connectFolder()
+    if (!handle) return start.connect()
     try {
       if ((await handle.requestPermission({ mode: 'read' })) !== 'granted') return
-      await openSession(new FolderSource(handle))
+      await openFolder(dirFromHandle(handle), 'folder', lastWorld())
     } catch {
-      actions.connectFolder()
+      void start.connect()
     }
   },
-  async openZip() {
+  async choose() {
+    const files = await pickFile('', true)
+    if (!files.length) return
+    const rel = (f: File) => (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name
+    await openFolder(dirFromFiles(files.map(f => ({ path: rel(f), file: f }))), 'upload', lastWorld())
+  },
+  async zip() {
     const [f] = await pickFile('.zip,application/zip')
     if (!f) return
     try {
+      scan = null
       await openSession(await ZipSource.open(f))
     } catch (e) {
       toast(String((e as Error).message ?? e), true)
     }
   },
-  async uploadFolder() {
-    const files = await pickFile('', true)
-    if (!files.length) return
-    try {
-      await openSession(UploadSource.fromFiles(files))
-    } catch (e) {
-      toast(String((e as Error).message ?? e), true)
-    }
-  },
   demo() {
+    scan = null
     void openSession(new MemorySource(makeWorld()), true)
   },
+}
+
+async function useJar(f: File, from: string): Promise<void> {
+  S.textures = 'loading'
+  S.texturesFrom = 'Texturen werden gelesen …'
+  update()
+  try {
+    texturesCache = await loadTextures(f)
+    S.textures = 'ready'
+    S.texturesFrom = from
+    S.session?.setColors(texturesCache.mapColors, texturesCache.id)
+    view3d.setTextures(texturesCache.mesher)
+    mini.invalidate()
+  } catch (e) {
+    S.textures = 'none'
+    S.texturesFrom = null
+    toast(String((e as Error).message ?? e), true)
+  }
+  update()
+}
+
+const actions: SideActions = {
   closeWorld() {
     S.session?.dispose()
     S.session = null
     S.sel = null
-    S.view = 'map'
-    S.openArea = null
-    view3d?.close()
+    S.placing = null
+    view3d.close()
+    choosing = !!scan && scan.worlds.length > 1
     update()
   },
   async loadTextures(file?: File) {
     const f = file ?? (await pickFile('.jar,.zip'))[0]
-    if (!f) return
+    if (f) await useJar(f, f.name)
+  },
+  async mojangTextures() {
+    const version = S.session?.info.versionName || ''
+    const json = scan?.versions.find(v => v.version === version)?.json ?? null
     S.textures = 'loading'
+    S.texturesFrom = 'Lade von Mojang …'
     update()
     try {
-      texturesCache = await loadTextures(f)
-      S.textures = 'ready'
-      S.session?.setColors(texturesCache.mapColors, texturesCache.id)
-      view3d?.setTextures(texturesCache.mesher)
-      map.invalidate()
-      toast(`${texturesCache.count} Texturen geladen.`)
+      const f = await fetchJar(version, (done, total) => {
+        S.texturesFrom = `Lade von Mojang … ${Math.round((done / total) * 100)} %`
+        update()
+      }, json)
+      await useJar(f, `Minecraft ${f.name.replace(/\.jar$/, '')} (von Mojang)`)
     } catch (e) {
       S.textures = 'none'
-      toast(String((e as Error).message ?? e), true)
+      S.texturesFrom = null
+      toast(`Mojang nicht erreichbar (${(e as Error).message}). Alternativ die .jar wählen.`, true)
+      update()
     }
-    update()
   },
   exportLitematic() {
     exportAs('litematic')
@@ -224,25 +291,9 @@ const actions: SideActions = {
   exportSchem() {
     exportAs('schem')
   },
-  openArea(id) {
-    const ar = S.project.areas.find(a => a.id === id)
-    if (!ar || !S.session) return
-    S.openArea = id
-    if (S.sel?.kind !== 'placement' || selectedPlacement()?.areaId !== id) S.sel = { kind: 'area', id }
-    S.view = '3d'
-    map.setDrawing(false)
-    update()
-    void ensureView().open(ar)
-  },
-  drawArea() {
-    if (S.view !== 'map') setView('map')
-    map.setDrawing(!map.drawing)
-  },
   startPlacing(type) {
     S.placing = type
     update()
-    // am Handy steht die 3D-Ansicht oben: dorthin zurück, damit man gleich ins Gelände tippen kann
-    if (window.innerWidth <= 700) $('stage').scrollIntoView({ behavior: 'smooth', block: 'start' })
   },
   cancelPlacing() {
     S.placing = null
@@ -255,22 +306,15 @@ const actions: SideActions = {
     applyTheme()
     update()
   },
-  focusArea(id) {
-    const a = S.project.areas.find(a => a.id === id)
-    if (a && S.view === 'map') map.focus((a.x0 + a.x1 + 1) / 2, (a.z0 + a.z1 + 1) / 2)
-  },
   focusPoint(x, z) {
-    if (S.view !== 'map') setView('map')
-    map.focus(x, z, Math.max(map.zoom, 2))
+    view3d.jumpTo(x, z, 140)
   },
   focusPlacement(id) {
-    view3d?.focusPlacement(id)
+    view3d.focusPlacement(id)
   },
   learnPalette() {
-    if (!view3d) return
-    const area = S.project.areas.find(a => a.id === S.openArea)
-    const r = learnPalette(view3d.blockCounts(), S.build.style, `Aus ${area?.name ?? 'Bereich'}`)
-    if (!r) return toast('In diesem Bereich ist noch zu wenig gebaut, um eine Palette abzulesen.')
+    const r = learnPalette(view3d.blockCounts(), S.build.style, 'Aus der Umgebung')
+    if (!r) return toast('Hier ist noch zu wenig gebaut, um eine Palette abzulesen. Näher an eure Bauten heranfliegen.')
     addPalette(r.palette)
     S.build.palette = r.palette.id
     const found = Object.entries(r.roles).map(([role, id]) => `${ROLE_LABEL[role] ?? role}: ${String(id).replace(/_/g, ' ')}`).join(', ')
@@ -296,7 +340,7 @@ const actions: SideActions = {
     update()
   },
   terrainCut(id) {
-    return view3d?.terrainCut(id) ?? 0
+    return view3d.terrainCut(id)
   },
   textured() {
     return texturesCache?.mesher ?? null
@@ -356,99 +400,130 @@ async function saveFile(filename: string, bytes: Uint8Array): Promise<'file' | '
 
 const ROLE_LABEL: Record<string, string> = { sockel: 'Sockel', wall: 'Wand', frame: 'Balken', roof: 'Dach', trim: 'Kante', floor: 'Boden', window: 'Fenster', door: 'Tür', detail: 'Holz', light: 'Licht', accent: 'Stoff' }
 
-// ---------- 3D ----------
-
-let view3d: AreaView | null = null
-
-function ensureView(): AreaView {
-  if (!view3d) {
-    view3d = new AreaView($('three'))
-    if (texturesCache) view3d.setTextures(texturesCache.mesher)
-    const progress = document.createElement('div')
-    progress.className = 'progress'
-    progress.hidden = true
-    $('three').appendChild(progress)
-    view3d.onProgress = (done, total) => {
-      progress.hidden = done >= total
-      progress.innerHTML = `<span>Gelände ${Math.round((done / Math.max(1, total)) * 100)} %</span><i style="width:${(done / Math.max(1, total)) * 100}%"></i>`
-    }
-    const home = document.createElement('button')
-    home.className = 'btn map-draw'
-    home.innerHTML = `${I.target}Übersicht`
-    home.title = 'Kamera zurück über den Bereich'
-    home.addEventListener('click', () => view3d?.overview())
-    $('three').appendChild(home)
-    view3d.onAimText = html => {
-      if (S.view === '3d') $('readout').innerHTML = html
-    }
-  }
-  return view3d
-}
-
 // ---------- Zeichnen ----------
 
 function render(): void {
+  const on = !!S.session
   renderSide($('side'), actions)
   renderGuide($('guide'))
-  $('map').hidden = S.view !== 'map'
-  $('three').hidden = S.view !== '3d'
-  document.querySelectorAll<HTMLElement>('#switch [data-view]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.view === S.view)))
-  placeThumb($('switch'))
-  $('switch').hidden = !S.session
-  renderEmpty()
-  map.invalidate()
-  drawBtn.hidden = !S.session
-  drawBtn.setAttribute('aria-pressed', String(map.drawing))
-  $('stage').classList.toggle('placing', !!S.placing)
-  if (S.view === '3d') view3d?.sync()
-  else if (!S.session) $('readout').textContent = ''
+  renderStart()
+  renderTools()
+  renderStatusChip()
+  $('mini').hidden = !on
+  $('mini').classList.toggle('big', S.bigMap)
+  $('mini-toggle').innerHTML = S.bigMap ? I.shrink : I.expand
+  $('mini-toggle').title = S.bigMap ? 'Karte klein (M)' : 'Karte groß (M)'
+  document.body.classList.toggle('placing', !!S.placing)
+  document.body.classList.toggle('has-guide', !!selectedPlacement())
+  document.body.classList.toggle('panel-collapsed', S.panelCollapsed)
+  mini.invalidate()
+  if (on) view3d.sync()
+  else $('status').textContent = ''
 }
 
-function renderEmpty(): void {
-  let el = document.getElementById('empty')
-  if (S.session) {
-    el?.remove()
-    return
-  }
+function renderTools(): void {
+  const el = $('tools')
+  el.hidden = !S.session
+  if (!S.session) return
+  const fly = S.camMode === 'fly'
+  el.innerHTML = `
+    <button class="btn tool ${fly ? 'accent' : ''}" data-t="fly" title="Flugmodus mit Fadenkreuz (F)" aria-pressed="${fly}">${I.fly}<span>Flugmodus</span><kbd>F</kbd></button>
+    <button class="btn tool icon" data-t="home" title="Zurück zum Start">${I.home}</button>
+    <button class="btn tool icon" data-t="theme" title="Hell / Dunkel">${document.documentElement.dataset.theme === 'dark' || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches) ? I.sun : I.moon}</button>`
+}
+$('tools').addEventListener('click', e => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-t]')
+  if (!b) return
+  if (b.dataset.t === 'fly') view3d.setMode(S.camMode === 'fly' ? 'orbit' : 'fly')
+  if (b.dataset.t === 'home') view3d.home()
+  if (b.dataset.t === 'theme') actions.toggleTheme()
+})
+
+/** Kleiner Hinweis oben: was gerade lädt. */
+function renderStatusChip(): void {
+  let el = document.getElementById('loading')
   if (!el) {
     el = document.createElement('div')
-    el.id = 'empty'
-    el.className = 'empty'
-    $('map').appendChild(el)
+    el.id = 'loading'
+    el.className = 'loading-chip'
+    $('app').appendChild(el)
   }
-  const label = S.savedFolder && canConnectFolder() ? `Weiter mit „${S.savedFolder}“` : canConnectFolder() ? 'Welt-Ordner verbinden' : 'Welt-Ordner wählen'
-  el.innerHTML = `<div><h2>Deine Welt als Karte</h2><p>Weltordner hierher ziehen oder wählen, dann einen Bereich aufziehen.</p>
-    <button class="btn primary" data-e="go">${I.folder}${label}</button></div>`
-  el.querySelector('[data-e="go"]')!.addEventListener('click', () => (!canConnectFolder() ? actions.uploadFolder() : S.savedFolder ? actions.reopenFolder() : actions.connectFolder()))
+  const s = S.session
+  const p = s?.progress()
+  const parts: string[] = []
+  if (s && groundLoading) parts.push('Gelände lädt')
+  if (p && p.done < p.total) parts.push(`Karte ${p.done} / ${p.total}`)
+  if (S.textures === 'loading') parts.push(S.texturesFrom ?? 'Texturen')
+  el.hidden = !parts.length
+  el.innerHTML = `<span class="dot busy"></span>${esc(parts.join(' · '))}`
+}
+
+function renderStart(): void {
+  const el = $('start')
+  el.hidden = !!S.session
+  if (S.session) return
+  if (S.busy) {
+    el.innerHTML = `<div class="start-card"><div class="status-line"><span class="dot busy"></span>${esc(S.busy)}</div></div>`
+    return
+  }
+  if (choosing && scan) {
+    const rows = scan.worlds.map((w, i) => `<button class="item" data-world="${i}">
+        <span class="sq"></span><span class="grow"><span class="item-name" style="display:block">${esc(w.name)}</span>
+        <span class="item-sub">${w.lastPlayed ? `zuletzt ${new Date(w.lastPlayed).toLocaleDateString('de-DE', { day: 'numeric', month: 'short', year: 'numeric' })}` : ''}${w.versionName ? ` · ${esc(w.versionName)}` : ''}${w.folder !== w.name ? ` · ${esc(w.folder)}` : ''}</span></span></button>`).join('')
+    el.innerHTML = `<div class="start-card wide">
+      <h2>Welche Welt?</h2>
+      <p class="muted">Zuletzt gespielte zuerst. Ein heruntergeladenes Realm liegt hier wie eine normale Welt.</p>
+      <div class="list world-list">${rows}</div>
+      <button class="linkish small" data-s="back">Anderen Ordner wählen</button></div>`
+    el.querySelectorAll<HTMLElement>('[data-world]').forEach(b => b.addEventListener('click', () => void openWorldEntry(scan!.worlds[Number(b.dataset.world)])))
+    el.querySelector('[data-s="back"]')!.addEventListener('click', () => {
+      choosing = false
+      update()
+    })
+    return
+  }
+  // Chrome gibt auf dem Mac nichts unter ~/Library frei (Sperrliste der Ordner-Freigabe), dort also auswählen oder hineinziehen
+  const picker = canConnectFolder() && !isMac
+  el.innerHTML = `<div class="start-card">
+    <h2>Eure Welt in 3D</h2>
+    <p class="muted">Gib den Minecraft-Ordner frei. Die App findet eure Welten und die Spiel-.jar für die Texturen selbst. Alles bleibt auf diesem Rechner.</p>
+    <div class="stack">
+      ${picker && S.savedFolder ? `<button class="btn primary" data-s="reopen">${I.folder}Weiter mit „${esc(S.savedFolder)}“</button>` : ''}
+      ${picker ? `<button class="btn ${S.savedFolder ? '' : 'primary'}" data-s="connect">${I.folder}Minecraft-Ordner freigeben</button>` : ''}
+      <button class="btn ${picker ? '' : 'primary'}" data-s="choose">${I.folder}${picker ? 'Ordner auswählen' : 'Minecraft-Ordner auswählen'}</button>
+    </div>
+    <p class="note muted">${isMac ? 'Im Auswahlfenster <b>⇧⌘G</b> drücken, <b>~/Library/Application Support/minecraft</b> eingeben, „Hochladen“ bestätigen (es wird nichts hochgeladen, Chrome nennt das nur so). Oder den Ordner aus dem Finder hierher ziehen.' : 'Unter Windows: <b>%appdata%\\.minecraft</b>. Oder den Ordner hierher ziehen.'}</p>
+    <div class="row start-more"><button class="linkish small" data-s="zip">Welt als ZIP</button><button class="linkish small" data-s="demo">Mit Testwelt ausprobieren</button></div>
+  </div>`
+  el.querySelectorAll<HTMLElement>('[data-s]').forEach(b => b.addEventListener('click', () => void start[b.dataset.s as keyof typeof start]()))
 }
 
 subscribe(render)
 
-// ---------- Ordner oder ZIP hineinziehen ----------
+// ---------- Ordner, ZIP oder .jar hineinziehen ----------
 
-const stage = $('stage')
-stage.addEventListener('dragover', e => {
+const app = $('app')
+app.addEventListener('dragover', e => {
   if (!e.dataTransfer?.types.includes('Files')) return
   e.preventDefault()
-  stage.classList.add('drop')
+  app.classList.add('drop')
 })
-stage.addEventListener('dragleave', e => {
-  if (e.target === stage || !stage.contains(e.relatedTarget as Node)) stage.classList.remove('drop')
+app.addEventListener('dragleave', e => {
+  if (e.target === app || !app.contains(e.relatedTarget as Node)) app.classList.remove('drop')
 })
-stage.addEventListener('drop', async e => {
+app.addEventListener('drop', async e => {
   e.preventDefault()
-  stage.classList.remove('drop')
+  app.classList.remove('drop')
   const dt = e.dataTransfer
   if (!dt) return
   try {
     const jar = [...dt.files].find(f => /\.jar$/i.test(f.name))
-    if (jar && dt.files.length === 1) return void (S.session ? actions.loadTextures(jar) : toast('Erst die Welt laden, dann die .jar.'))
+    if (jar && dt.files.length === 1) return void (S.session ? useJar(jar, jar.name) : toast('Erst die Welt laden, dann die .jar.'))
     const zip = [...dt.files].find(f => /\.zip$/i.test(f.name))
     if (zip && dt.files.length === 1) return await openSession(await ZipSource.open(zip))
-    S.busy = 'Ordner wird gelesen …'
-    update()
-    const entries = await filesFromDrop(dt.items)
-    await openSession(new UploadSource(entries))
+    const entry = [...dt.items].map(i => i.webkitGetAsEntry?.()).find(x => x?.isDirectory)
+    if (!entry) return toast('Bitte einen Ordner hineinziehen (Minecraft-Ordner oder eine Welt).', true)
+    await openFolder(dirFromEntry(entry as FileSystemDirectoryEntry), 'upload', lastWorld())
   } catch (err) {
     S.busy = null
     toast(String((err as Error).message ?? err), true)
@@ -459,21 +534,28 @@ stage.addEventListener('drop', async e => {
 // ---------- Tastatur ----------
 
 window.addEventListener('keydown', e => {
-  const t = e.target as HTMLElement
-  if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') return
+  if (isTyping(e) || e.metaKey || e.ctrlKey || e.altKey) return
+  if (!S.session) return
   if (e.key === 'Escape') {
-    if (map.drawing) map.setDrawing(false)
-    else if (S.placing) S.placing = null
+    if (S.placing) S.placing = null
+    else if (S.bigMap) S.bigMap = false
+    else if (S.camMode === 'fly') view3d.setMode('orbit')
+    else if (S.sel) S.sel = null
     else return
+    mini.setBig(S.bigMap)
     update()
     return
   }
-  if ((e.key === 'r' || e.key === 'R') && S.placing) {
-    view3d?.rotateGhost(e.shiftKey ? -1 : 1)
+  if (e.code === 'KeyF') {
+    view3d.setMode(S.camMode === 'fly' ? 'orbit' : 'fly')
     return
   }
-  if ((e.key === 'b' || e.key === 'B') && S.view === 'map' && S.session) {
-    actions.drawArea()
+  if (e.code === 'KeyM') {
+    setBigMap(!S.bigMap)
+    return
+  }
+  if (e.code === 'KeyR' && S.placing) {
+    view3d.rotateGhost(e.shiftKey ? -1 : 1)
     return
   }
   const p = selectedPlacement()
@@ -483,11 +565,11 @@ window.addEventListener('keydown', e => {
   if (e.key === '[' || e.key === ']') {
     stop()
     step(e.key === ']' ? 1 : -1, count)
-  } else if (e.key === 'p' || e.key === 'P') {
+  } else if (e.code === 'KeyP') {
     S.guide.playing ? stop() : play(count)
-  } else if (e.key === 'r' || e.key === 'R') {
+  } else if (e.code === 'KeyR') {
     rotatePlacement(p.id, e.shiftKey ? -1 : 1)
-  } else if (moves[e.key] && S.view === '3d') {
+  } else if (moves[e.key]) {
     e.preventDefault()
     nudgePlacement(p.id, moves[e.key])
   } else return
@@ -496,10 +578,14 @@ window.addEventListener('keydown', e => {
 
 // ---------- Start ----------
 
+applyTheme()
 void (async () => {
   await loadTemplates()
   const handle = await store.get<FileSystemDirectoryHandle>('kv', 'folder')
   if (handle) S.savedFolder = handle.name
   update()
-  if (new URLSearchParams(location.search).has('demo')) actions.demo()
+  if (new URLSearchParams(location.search).has('demo')) start.demo()
 })()
+
+// für den Rundgang im Browser (Kamera prüfen und steuern)
+;(window as unknown as { __bp: unknown }).__bp = { view3d, S, mini }

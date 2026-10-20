@@ -13,7 +13,7 @@
   --r: 20px; --r-s: 12px; --ease: cubic-bezier(.22,1,.36,1);
   --spring: linear(0, .039, .134, .258, .393, .524, .644, .748, .833, .901, .952, .989, 1.013, 1.028, 1.036, 1.038, 1.037, 1.034, 1.029, 1.024, 1.019, 1.014, 1.01, 1.007, 1.004, 1.002, 1.001, 1);
   --stage: #ECECF1; --map-empty: #E9E9EE; --map-grid: rgba(12,12,20,.05);
-  --side-w: 300px;
+  --panel-w: 340px; --gut: 16px; --mini-w: 260px;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -53,8 +53,10 @@ button { cursor: pointer; }
 [hidden] { display: none !important; }
 :focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
 
-#app { display: grid; grid-template-columns: var(--side-w) 1fr; height: 100vh; }
-#main { display: grid; grid-template-rows: 1fr auto; min-width: 0; min-height: 0; }
+/* Die 3D-Welt füllt alles, Panel, Werkzeuge, Karte und Anleitung schweben darüber. */
+#app { position: relative; height: 100vh; height: 100dvh; overflow: hidden; background: var(--stage); }
+#app.drop::after { content: ""; position: absolute; inset: 10px; z-index: 30; border: 2px dashed var(--accent-line); border-radius: var(--r); background: var(--accent-soft); pointer-events: none; }
+.float { background: var(--surface); border-radius: var(--r); box-shadow: var(--shadow); }
 
 /* ---------- Bausteine ---------- */
 .btn {
@@ -112,13 +114,16 @@ button { cursor: pointer; }
 .small { font-size: 12.5px; }
 .mono-num { font-variant-numeric: tabular-nums; }
 
-/* ---------- Seitenleiste ---------- */
-#side {
-  display: flex; flex-direction: column; min-height: 0;
-  border-right: 1px solid var(--line); background: var(--surface);
+/* ---------- Bau-Panel ---------- */
+.panel {
+  position: absolute; left: var(--gut); top: var(--gut); bottom: var(--gut); width: var(--panel-w); z-index: 10;
+  display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+  background: var(--surface); border-radius: var(--r); box-shadow: var(--shadow);
 }
-.side-scroll { flex: 1; overflow-y: auto; padding: 18px 18px 8px; }
-.side-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); }
+body.panel-collapsed .panel { bottom: auto; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 10px 10px 18px; }
+.side-scroll { flex: 1; overflow-y: auto; padding: 0 18px 8px; border-top: 1px solid var(--line); }
+.world-name.small-name { font-size: 15px; }
 .block { padding: 14px 0 18px; border-bottom: 1px solid var(--line); }
 .block:first-child { padding-top: 2px; }
 .block:last-child { border-bottom: 0; }
@@ -171,55 +176,74 @@ button { cursor: pointer; }
 .note { font-size: 12.5px; color: var(--fg-2); line-height: 1.45; }
 .note.bad { color: var(--gap-ink); }
 
-/* ---------- Bühne (Karte/3D) ---------- */
-#stage { position: relative; min-height: 0; background: var(--stage); overflow: hidden; }
-#stage.drop::after { content: ""; position: absolute; inset: 10px; z-index: 8; border: 2px dashed var(--accent-line); border-radius: var(--r); background: var(--accent-soft); pointer-events: none; }
+/* ---------- 3D, Werkzeuge, Status ---------- */
 .view { position: absolute; inset: 0; }
-.view canvas { display: block; width: 100%; height: 100%; }
-#switch { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); box-shadow: var(--shadow); background: var(--surface-2); z-index: 5; }
-.readout {
-  position: absolute; left: 14px; bottom: 14px; z-index: 5;
+.view canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+body.placing #three canvas { cursor: copy; }
+
+.tools { position: absolute; top: var(--gut); right: var(--gut); z-index: 10; display: flex; gap: 8px; }
+.btn.tool { background: var(--surface); box-shadow: var(--shadow); }
+.btn.tool:hover { background: var(--surface-2); }
+.btn.tool.accent { background: var(--accent-ink); color: var(--on-accent); }
+.btn.tool kbd { font: 500 11px var(--sans); padding: 1px 6px; border-radius: 6px; background: var(--surface-2); color: var(--fg-3); }
+.btn.tool.accent kbd { background: rgba(255,255,255,.18); color: inherit; }
+
+.status, .loading-chip {
+  position: absolute; left: calc(var(--panel-w) + var(--gut) * 2); z-index: 9; max-width: calc(100% - var(--panel-w) - 420px);
   padding: 6px 12px; border-radius: 999px; background: var(--surface); box-shadow: var(--shadow);
-  font-size: 12.5px; color: var(--fg-2); pointer-events: none; white-space: nowrap;
+  font-size: 12.5px; color: var(--fg-2); pointer-events: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.readout:empty { display: none; }
-.readout b { color: var(--fg); font-weight: 500; }
+.status { top: var(--gut); }
+.status:empty { display: none; }
+.status b { color: var(--fg); font-weight: 500; }
+.loading-chip { top: calc(var(--gut) + 40px); }
+.loading-chip .dot, .start .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; background: var(--accent); animation: pulse 1.2s var(--ease) infinite; }
+
 .toast {
-  position: absolute; left: 50%; top: 62px; transform: translateX(-50%); z-index: 6; max-width: min(560px, 90%);
+  position: absolute; left: 50%; top: 72px; transform: translateX(-50%); z-index: 40; max-width: min(560px, 90%);
   padding: 10px 16px; border-radius: 14px; background: var(--fg); color: var(--bg); font-size: 13px;
   animation: toast-in .33s var(--spring);
 }
 .toast.bad { background: var(--gap); color: #fff; }
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, -6px); } }
 
-.empty {
-  position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 24px;
+/* ---------- Start ---------- */
+.start {
+  position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; padding: 24px; overflow-y: auto;
   background:
     linear-gradient(var(--map-grid) 1px, transparent 1px) 0 0 / 32px 32px,
     linear-gradient(90deg, var(--map-grid) 1px, transparent 1px) 0 0 / 32px 32px,
     var(--map-empty);
 }
-.empty h2 { margin: 0 0 6px; font-size: 26px; font-weight: 600; letter-spacing: -.02em; }
-.empty p { margin: 0 0 18px; color: var(--fg-3); font-size: 14px; }
+.start-card { width: min(440px, 100%); padding: 28px; background: var(--surface); border-radius: var(--r); box-shadow: var(--shadow); }
+.start-card.wide { width: min(520px, 100%); }
+.start-card h2 { margin: 0 0 8px; font-size: 26px; font-weight: 600; letter-spacing: -.02em; }
+.start-card > p { margin: 0 0 18px; font-size: 14px; }
+.start-card .note { margin: 14px 0 0; }
+.start-more { margin-top: 10px; gap: 14px; }
+.world-list { max-height: 52vh; overflow-y: auto; margin: 0 -8px 10px; }
+
+/* ---------- Karte zum Hinspringen ---------- */
+.mini {
+  position: absolute; right: var(--gut); bottom: var(--gut); z-index: 10; width: var(--mini-w); height: calc(var(--mini-w) + 36px);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface); border-radius: var(--r); box-shadow: var(--shadow);
+  transition: width .35s var(--ease), height .35s var(--ease);
+}
+.mini.big { top: calc(var(--gut) + 52px); left: calc(var(--panel-w) + var(--gut) * 2); width: auto; height: auto; z-index: 12; }
+.mini-map { position: relative; flex: 1; min-height: 0; }
+.mini-map canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: pointer; }
+.mini-bar { display: flex; align-items: center; gap: 6px; height: 36px; padding: 0 4px 0 12px; border-top: 1px solid var(--line); font-size: 12px; color: var(--fg-2); }
+.mini-bar b { color: var(--fg); font-weight: 500; }
+
 .linkish { background: none; border: 0; padding: 4px; color: var(--fg-3); font-size: 13px; text-decoration: underline; text-underline-offset: 3px; }
 .linkish:hover { color: var(--fg); }
 
-.map-tools { position: absolute; right: 14px; bottom: 14px; z-index: 5; display: flex; flex-direction: column; gap: 6px; }
-.map-tools .btn { background: var(--surface); box-shadow: var(--shadow); }
-.map-tools .btn:hover { background: var(--surface-2); }
-.tip {
-  position: absolute; z-index: 7; pointer-events: none; padding: 6px 10px; border-radius: 10px;
-  background: var(--surface); box-shadow: var(--shadow); font-size: 12.5px; white-space: nowrap;
-}
-.tip b { font-weight: 500; }
-.loading-bar { position: absolute; left: 0; right: 0; top: 0; height: 2px; z-index: 6; overflow: hidden; }
-.loading-bar::after { content: ""; position: absolute; inset: 0; width: 30%; background: var(--accent); animation: slide 1.1s var(--ease) infinite; }
-@keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
-
 /* ---------- Bauanleitung ---------- */
-#guide {
-  display: grid; grid-template-columns: minmax(0, 1fr) 320px; height: 248px;
-  border-top: 1px solid var(--line); background: var(--surface);
+.guide {
+  position: absolute; z-index: 11; bottom: var(--gut); left: calc(var(--panel-w) + var(--gut) * 2); right: calc(var(--mini-w) + var(--gut) * 2);
+  display: grid; grid-template-columns: minmax(0, 1fr) 300px; height: 248px; overflow: hidden;
+  background: var(--surface); border-radius: var(--r); box-shadow: var(--shadow);
 }
 .g-left { display: flex; flex-direction: column; gap: 14px; padding: 16px 20px; min-width: 0; }
 .g-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; }
@@ -254,50 +278,54 @@ button { cursor: pointer; }
 .mat-n small { display: block; font-size: 11.5px; font-weight: 400; color: var(--fg-3); }
 .mats-sum { padding: 8px 14px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--fg-3); }
 
-@media (max-width: 860px) {
-  :root { --side-w: 260px; }
-  #guide { grid-template-columns: 1fr; height: auto; }
-  .g-right { border-left: 0; border-top: 1px solid var(--line); max-height: 180px; }
+@media (max-width: 1279px) {
+  .guide { right: var(--gut); grid-template-columns: minmax(0, 1fr) 260px; }
+  body.has-guide .mini { bottom: calc(var(--gut) * 2 + 248px); --mini-w: 200px; }
+  body.has-guide .mini.big { bottom: calc(var(--gut) * 2 + 248px); }
+}
+@media (max-width: 1100px) {
+  :root { --panel-w: 300px; }
+  .btn.tool span, .btn.tool kbd { display: none; }
+  .btn.tool[data-t="fly"] { width: 36px; padding: 0; }
 }
 
-/* Handy: Bühne oben, Anleitung darunter, Auswahl am Ende. Gedacht ist die App für den Mac, am Handy soll sie lesbar bleiben. */
+/* Handy: 3D oben, Panel als Blatt unten. Gedacht ist die App für den Mac, am Handy soll sie bedienbar bleiben. */
 @media (max-width: 700px) {
-  body { overflow: auto; }
-  #app { display: flex; flex-direction: column; height: auto; }
-  #side { order: 2; border-right: 0; border-top: 1px solid var(--line); }
-  #main { order: 1; display: block; }
-  #stage { height: 58vh; min-height: 320px; }
-  #guide { height: auto; grid-template-columns: 1fr; }
+  :root { --gut: 8px; --mini-w: 116px; }
+  .panel { left: var(--gut); right: var(--gut); top: auto; bottom: var(--gut); width: auto; max-height: 46vh; }
+  body.panel-collapsed .panel { bottom: var(--gut); }
+  .tools { top: var(--gut); right: var(--gut); }
+  .status { top: var(--gut); left: var(--gut); max-width: calc(100% - 150px); font-size: 11.5px; }
+  .loading-chip { top: calc(var(--gut) + 36px); left: var(--gut); max-width: calc(100% - 150px); font-size: 11.5px; }
+  .mini { top: calc(var(--gut) + 48px); bottom: auto; height: calc(var(--mini-w) + 32px); }
+  .mini-bar { height: 32px; }
+  .mini-bar #mini-readout { display: none; }
+  .mini.big { top: calc(var(--gut) + 48px); left: var(--gut); right: var(--gut); bottom: var(--gut); height: auto; z-index: 15; }
+  body.has-guide .mini { bottom: auto; --mini-w: 116px; }
+  .fly-hint { display: none; }
+  .guide { left: var(--gut); right: var(--gut); bottom: var(--gut); height: auto; max-height: 44vh; overflow-y: auto; grid-template-columns: 1fr; }
+  body.has-guide .panel { bottom: calc(44vh + var(--gut) * 2); max-height: 26vh; }
   .g-left { padding: 14px 16px; }
-  .g-right { border-left: 0; border-top: 1px solid var(--line); max-height: none; }
-  .mats { max-height: 260px; }
-  .side-scroll { overflow: visible; padding: 16px; }
+  .g-right { border-left: 0; border-top: 1px solid var(--line); }
+  .mats { max-height: 220px; }
+  .start-card { padding: 22px; }
 }
 
-/* ---------- Bereiche und 3D-Flug ---------- */
-.item .sq.outline { background: transparent; border: 2px dashed var(--accent); }
-.map-draw { position: absolute; top: 14px; left: 14px; z-index: 5; background: var(--surface); box-shadow: var(--shadow); }
-.map-draw:hover { background: var(--surface-2); }
-.map-draw[aria-pressed="true"] { background: var(--accent-ink); color: var(--on-accent); }
-#map.drawing canvas { cursor: crosshair; }
+/* ---------- 3D-Flug ---------- */
 .crosshair { position: absolute; left: 50%; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; z-index: 6; pointer-events: none; }
 .crosshair::before, .crosshair::after { content: ""; position: absolute; background: #fff; mix-blend-mode: difference; }
 .crosshair::before { left: 8px; top: 0; width: 2px; height: 18px; }
 .crosshair::after { top: 8px; left: 0; height: 2px; width: 18px; }
+/* Tastenhilfe unten in der Mitte des freien Bereichs zwischen Panel und Karte */
 .fly-hint {
-  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 5; max-width: calc(100% - 28px);
+  position: absolute; bottom: var(--gut); z-index: 5;
+  left: calc(50% + (var(--panel-w) - var(--mini-w)) / 2); transform: translateX(-50%);
+  max-width: calc(100% - var(--panel-w) - var(--mini-w) - var(--gut) * 6);
   padding: 6px 14px; border-radius: 999px; background: var(--surface); box-shadow: var(--shadow);
   font-size: 12px; color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
 }
 .fly-hint b { color: var(--fg); font-weight: 500; }
-#three .readout, #stage .readout { bottom: 58px; }
-#map:not([hidden]) ~ .readout { bottom: 14px; }
-.progress {
-  position: absolute; top: 62px; left: 50%; transform: translateX(-50%); z-index: 6; width: 220px;
-  padding: 8px 12px 10px; border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); font-size: 12.5px; color: var(--fg-2);
-}
-.progress i { display: block; height: 3px; margin-top: 6px; border-radius: 2px; background: var(--accent); transition: width .3s var(--ease); }
-#stage.placing #three canvas { cursor: copy; }
+body.has-guide .fly-hint { display: none; }
 
 /* ---------- Bauen: Reiter, Chips, Paletten, Varianten ---------- */
 .seg.wide { display: flex; width: 100%; margin-bottom: 12px; }

@@ -11,7 +11,7 @@ let timer: number | undefined
 
 export function renderGuide(el: HTMLElement): void {
   const p = selectedPlacement()
-  el.hidden = !p || S.view !== '3d'
+  el.hidden = !p
   if (!p) {
     stop()
     return

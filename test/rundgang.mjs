@@ -1,9 +1,10 @@
-// Rundgang durch die App im echten Browser, im neuen Ablauf:
-// Bereich auf der Karte aufziehen → in 3D öffnen → fliegen → Testhaus setzen → Schichten → Export.
-// Dazu: eingebettet wie im Claude-Artifact (Ordner über Dateiauswahl) und ein Lasttest mit 500 × 500.
-// Aufruf: npm run build && npm run test:e2e   (optional JAR=/pfad/26.1.jar)
+// Rundgang durch die App im echten Browser, im Ablauf von Fassung 6:
+// Minecraft-Ordner wählen → Welt aussuchen → sofort 3D (Texturen aus versions/) → umsehen, weit raus,
+// Flugmodus → Haus setzen → anklicken = Anleitung → Karte groß, hinspringen → neu laden, alles noch da.
+// Dazu: eingebettet wie im Claude-Artifact, Ladezeit der großen Welt, Galerie der Stile.
+// Aufruf: npm run build && npm run test:e2e   (optional JAR=/pfad/26.1.jar, NUR_GALERIE=1, OHNE_GALERIE=1)
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, rmSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { chromium } from 'playwright-core'
 
@@ -18,27 +19,40 @@ const browser = await chromium.launch({ executablePath, args: ['--use-angle=swif
 const errors = []
 const fail = msg => { errors.push(msg); console.error('✗', msg) }
 
-const weltOrdner = (name, chunks) =>
-  execFileSync(process.execPath, ['--experimental-strip-types', new URL('./welt-ordner.mjs', import.meta.url).pathname, `${OUT}${name}`, String(chunks)]).toString().trim()
+// Minecraft-Ordner mit zwei Welten und versions/26.1 (mit .jar, falls JAR gesetzt) – einmal erzeugen
+const MC = `${OUT}minecraft`
+rmSync(MC, { recursive: true, force: true })
+execFileSync(process.execPath, ['--experimental-strip-types', new URL('./welt-ordner.mjs', import.meta.url).pathname, MC, 'minecraft', ...(process.env.JAR ? [process.env.JAR] : [])])
 
-/** Bereich auf der Karte aufziehen: von (ax,ay) nach (bx,by) relativ zur Kartenmitte, in Bildschirmpixeln. */
-async function aufziehen(page, root, ax, ay, bx, by) {
-  await root.locator('.map-draw').click()
-  const box = await root.locator('#map canvas').boundingBox()
-  const cx = box.x + box.width / 2, cy = box.y + box.height / 2
-  await page.mouse.move(cx + ax, cy + ay)
-  await page.mouse.down()
-  await page.mouse.move(cx + (ax + bx) / 2, cy + (ay + by) / 2, { steps: 4 })
-  await page.mouse.move(cx + bx, cy + by, { steps: 4 })
-  await page.mouse.up()
-  await root.locator('[data-act="open-area"]').waitFor({ timeout: 5000 })
+/** Minecraft-Ordner über „auswählen“ geben und eine Welt wählen (root = Seite oder Frame). */
+async function ordnerGeben(page, root, welt) {
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), root.locator('[data-s="choose"]').click()])
+  await chooser.setFiles(MC)
+  if (welt) {
+    await root.locator('[data-world]').first().waitFor({ timeout: 15000 })
+    await root.locator('[data-world]', { hasText: welt }).click()
+  }
+  await root.locator('#side:not([hidden])').waitFor({ timeout: 30000 })
 }
 
-async function warteAufGelaende(root, timeout = 30000) {
-  await root.locator('.progress').waitFor({ state: 'hidden', timeout })
+async function warteAufLaden(root, timeout = 120000) {
+  await root.locator('#loading').waitFor({ state: 'hidden', timeout })
 }
 
-async function run(theme, width, height) {
+/** Mit der Maus dorthin, wo die Anzeige einen Block nennt (wie ein Mensch zielt). */
+async function zielen(page, root, from = 0.45) {
+  const c = await root.locator('#three canvas').boundingBox()
+  for (let fy = from; fy < 0.9; fy += 0.05)
+    for (let fx = 0.4; fx < 0.75; fx += 0.07) {
+      const at = [c.x + c.width * fx, c.y + c.height * fy]
+      await page.mouse.move(...at)
+      await page.waitForTimeout(60)
+      if (/grass|sand|leaves|log|cobble|dirt|Block/i.test((await root.locator('#status').textContent()) ?? '')) return at
+    }
+  return [c.x + c.width / 2, c.y + c.height * 0.6]
+}
+
+async function run(theme, width, height, voll) {
   const page = await browser.newPage({ viewport: { width, height }, colorScheme: theme, acceptDownloads: true })
   page.on('pageerror', e => fail(`${theme} ${width}: ${e.message}`))
   page.on('console', m => { if (m.type() === 'error') fail(`${theme} ${width} console: ${m.text()}`) })
@@ -47,71 +61,114 @@ async function run(theme, width, height) {
   await page.goto(`http://localhost:${PORT}/`)
   await page.waitForTimeout(400)
   await shot('01-start')
-  await page.goto(`http://localhost:${PORT}/?demo`)
-  await page.waitForSelector('.world-name', { timeout: 8000 })
-  await page.waitForTimeout(1200)
-
-  if (process.env.JAR && width === 1440) {
-    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-act="textures"]')])
-    await chooser.setFiles(process.env.JAR)
-    await page.waitForFunction(() => document.body.textContent.includes('Texturen aus deiner .jar'), null, { timeout: 60000 })
-    await page.waitForTimeout(1200)
-  }
-  await shot('02-karte')
-
-  await aufziehen(page, page, -60, -50, 120, 90)
-  await shot('03-bereich')
-  await page.click('[data-act="open-area"]')
-  await warteAufGelaende(page)
-  await page.waitForTimeout(600)
-  await shot('04-3d-bereich')
-
-  // Fliegen: eine Sekunde vorwärts, dann etwas hoch
-  await page.locator('#three canvas').focus()
-  await page.keyboard.down('KeyW')
-  await page.waitForTimeout(900)
-  await page.keyboard.up('KeyW')
-  await page.keyboard.down('Space')
-  await page.waitForTimeout(300)
-  await page.keyboard.up('Space')
-  await page.waitForTimeout(300)
-  const pos = await page.locator('#readout').textContent()
-  if (!/Du: X/.test(pos ?? '')) fail(`${theme} ${width}: Kameraposition fehlt in der Anzeige ("${pos}")`)
-  await shot('05-geflogen')
-
-  // Platzieren: Typ wählen, ins Gelände unterhalb der Mitte zielen, klicken
-  await page.click('[data-act="start-place"]')
-  const box = await page.locator('#three canvas').boundingBox()
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.62)
-  await page.waitForTimeout(400)
-  await shot('06-vorschau')
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height * 0.62)
-  await page.waitForSelector('#guide:not([hidden])', { timeout: 5000 })
-  await page.waitForTimeout(500)
-  await shot('07-platziert')
-  await page.click('[data-g="next"]')
-  await page.click('[data-g="next"]')
-  await page.waitForTimeout(400)
-  await shot('08-ebene2')
-  await page.click('[data-act="rotR"]')
-  await page.waitForTimeout(500)
-  await shot('09-gedreht')
-
-  const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-act="litematic"]')])
-  await dl.saveAs(`${OUT}export-${theme}.litematic`)
-
-  // Neu laden: Bereich und Bauwerk müssen noch da sein
-  await page.goto(`http://localhost:${PORT}/?demo`)
-  await page.waitForSelector('.world-name')
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.locator('[data-s="choose"]').click()])
+  await chooser.setFiles(MC)
+  await page.locator('[data-world]').first().waitFor({ timeout: 15000 })
+  if ((await page.locator('[data-world]').count()) !== 2) fail(`${theme} ${width}: nicht beide Welten zur Auswahl`)
+  const erste = await page.locator('[data-world]').first().textContent()
+  if (!erste.includes('Große Testwelt')) fail(`${theme} ${width}: zuletzt gespielte Welt steht nicht oben (${erste})`)
+  await shot('02-welten')
+  await page.locator('[data-world]', { hasText: 'Große Testwelt' }).click()
+  await page.locator('#side:not([hidden])').waitFor({ timeout: 30000 })
+  if (process.env.JAR) {
+    await page.waitForFunction(() => document.body.textContent.includes('Texturen aus versions/26.1/26.1.jar'), null, { timeout: 90000 })
+      .catch(() => fail(`${theme} ${width}: .jar aus versions/ nicht automatisch geladen`))
+  } else if (!(await page.locator('[data-act="mojang"]').count())) fail(`${theme} ${width}: ohne .jar kein Mojang-Knopf`)
+  await warteAufLaden(page)
   await page.waitForTimeout(800)
-  if ((await page.locator('[data-area]').count()) < 1) fail(`${theme} ${width}: Bereich nach Neuladen weg`)
-  if (!(await page.locator('[data-area]').first().textContent()).includes('Bauwerk')) fail(`${theme} ${width}: Bauwerk nach Neuladen weg`)
+  await shot('03-3d')
+  if (!voll) {
+    await page.close()
+    return
+  }
+
+  // weit heraus: Umgebung bis zum Horizont (Ferne aus den Kartenkacheln)
+  const c = await page.locator('#three canvas').boundingBox()
+  await page.mouse.move(c.x + c.width / 2, c.y + c.height / 2)
+  for (let i = 0; i < 10; i++) {
+    await page.mouse.wheel(0, 400)
+    await page.waitForTimeout(60)
+  }
+  await page.waitForTimeout(2500)
+  await warteAufLaden(page)
+  await shot('04-weit')
+  await page.click('[data-t="home"]')
+  await page.waitForTimeout(400)
+  await warteAufLaden(page)
+
+  // Haus setzen, Anleitung erscheint
+  await page.click('[data-act="start-place"]')
+  const at = await zielen(page, page)
+  await page.waitForTimeout(300)
+  await shot('05-vorschau')
+  await page.mouse.click(...at)
+  await page.locator('#guide:not([hidden])').waitFor({ timeout: 8000 }).catch(() => fail(`${theme} ${width}: nach dem Setzen keine Anleitung`))
+  await page.waitForTimeout(600)
+  await shot('06-gesetzt')
+  await page.click('[data-g="next"]')
+  await page.click('[data-g="next"]')
+  await page.waitForTimeout(500)
+  await shot('07-ebene')
+
+  // abwählen, dann das Haus wieder anklicken = Anleitung
+  await page.click('[data-act="deselect"]')
+  await page.waitForTimeout(300)
+  if (await page.locator('#guide:not([hidden])').count()) fail(`${theme} ${width}: Anleitung bleibt nach Abwählen offen`)
+  await page.locator('[data-placement]').first().click()
+  await page.locator('#guide:not([hidden])').waitFor({ timeout: 5000 }).catch(() => fail(`${theme} ${width}: Klick auf Bauwerk öffnet keine Anleitung`))
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(300)
+
+  // Flugmodus mit Fadenkreuz
+  await page.keyboard.press('f')
+  await page.waitForTimeout(400)
+  if (await page.locator('.crosshair[hidden]').count()) fail(`${theme} ${width}: F zeigt kein Fadenkreuz`)
+  await page.keyboard.down('w')
+  await page.waitForTimeout(700)
+  await page.keyboard.up('w')
+  await shot('08-flug')
+  await page.keyboard.press('f')
+  await page.waitForTimeout(300)
+
+  // Karte groß, hinspringen
+  await page.keyboard.press('m')
+  await page.waitForTimeout(800)
+  await shot('09-karte')
+  const m = await page.locator('#mini-map canvas').boundingBox()
+  await page.mouse.click(m.x + m.width * 0.75, m.y + m.height * 0.75)
+  await page.waitForTimeout(1500)
+  await warteAufLaden(page)
+  await shot('10-gesprungen')
+
+  // neu laden: Welt ohne Auswahl wieder offen (zuletzt gewählt), Bauwerk noch da
+  await page.reload()
+  await ordnerGeben(page, page, null)
+  if (!(await page.locator('[data-placement]').count())) fail(`${theme} ${width}: Bauwerk nach Neuladen weg`)
+  await page.close()
+}
+
+// Handy: 3D oben, Panel unten
+async function handy() {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true })
+  page.on('pageerror', e => fail(`handy: ${e.message}`))
+  await page.goto(`http://localhost:${PORT}/?demo`)
+  await page.locator('#side:not([hidden])').waitFor({ timeout: 10000 })
+  await warteAufLaden(page)
+  await page.waitForTimeout(800)
+  await page.screenshot({ path: `${OUT}20-handy-3d.png` })
+  await page.click('[data-act="start-place"]')
+  const c = await page.locator('#three canvas').boundingBox()
+  await page.touchscreen.tap(c.x + c.width / 2, c.y + c.height * 0.3)
+  await page.locator('#guide:not([hidden])').waitFor({ timeout: 5000 }).catch(() => fail('handy: Tippen setzt kein Haus'))
+  await page.waitForTimeout(800)
+  await page.screenshot({ path: `${OUT}21-handy-gesetzt.png` })
+  const over = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)
+  if (over) fail('handy: Seite scrollt seitlich')
   await page.close()
 }
 
 // Wie im Claude-Artifact: eingebettet in eine fremde Seite, Ordner über die Dateiauswahl.
 async function eingebettet() {
-  const dir = weltOrdner('Realm Testwelt', 8)
   const host = createServer((_, res) => {
     res.setHeader('content-type', 'text/html')
     res.end(`<!doctype html><body style="margin:0"><iframe src="http://localhost:${PORT}/" style="border:0;width:100vw;height:100vh"></iframe>`)
@@ -120,144 +177,75 @@ async function eingebettet() {
   page.on('pageerror', e => fail(`eingebettet: ${e.message}`))
   await page.goto(`http://127.0.0.1:${PORT + 1}/`)
   const frame = page.frameLocator('iframe')
-  await frame.locator('[data-act="upload"]').waitFor({ timeout: 8000 })
-  if (await frame.locator('[data-act="folder"]').count()) fail('eingebettet: Knopf "verbinden" sichtbar, der dort nicht geht')
-  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), frame.locator('[data-act="upload"]').click()])
-  await chooser.setFiles(dir)
-  await frame.locator('.world-name').waitFor({ timeout: 10000 })
-  await page.waitForTimeout(1000)
-  await aufziehen(page, frame, -40, -30, 80, 60)
-  await frame.locator('[data-act="open-area"]').click()
-  await warteAufGelaende(frame)
-  await page.waitForTimeout(500)
-  await page.screenshot({ path: `${OUT}10-eingebettet.png` })
+  await frame.locator('[data-s="choose"]').waitFor({ timeout: 8000 })
+  if (await frame.locator('[data-s="connect"]').count()) fail('eingebettet: Knopf „freigeben“ sichtbar, der dort nicht geht')
+  await ordnerGeben(page, frame, 'Realm Testwelt')
+  await warteAufLaden(frame)
+  await page.waitForTimeout(800)
+  await page.screenshot({ path: `${OUT}30-eingebettet.png` })
   await page.close()
   host.close()
 }
 
-// Lasttest: volle Region, Bereich 500 × 500, Zeit bis alles geladen ist.
+// Ladezeit: große Welt (4 volle Regionen), bis Gelände und Karte fertig sind
 async function last() {
-  const dir = weltOrdner('Grosse Testwelt', 32)
-  const host = createServer((_, res) => {
-    res.setHeader('content-type', 'text/html')
-    res.end(`<!doctype html><body style="margin:0"><iframe src="http://localhost:${PORT}/" style="border:0;width:100vw;height:100vh"></iframe>`)
-  }).listen(PORT + 2)
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
   page.on('pageerror', e => fail(`last: ${e.message}`))
-  await page.goto(`http://127.0.0.1:${PORT + 2}/`)
-  const frame = page.frameLocator('iframe')
-  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), frame.locator('[data-act="upload"]').click()])
-  await chooser.setFiles(dir)
-  await frame.locator('.world-name').waitFor({ timeout: 30000 })
-  await page.waitForTimeout(3000)
-  for (let i = 0; i < 4; i++) await frame.locator('[data-z="out"]').click()
-  await page.waitForTimeout(500)
-  const z = 2 / Math.pow(1.6, 4) // Zoom nach 4 × heraus, Karte steht auf dem Spawn (8, 8)
-  await aufziehen(page, frame, -6 * z, -6 * z, 494 * z, 494 * z)
-  const size = await frame.locator('[data-area] .item-sub').first().textContent()
+  await page.goto(`http://localhost:${PORT}/`)
   const t0 = Date.now()
-  await frame.locator('[data-act="open-area"]').click()
-  await warteAufGelaende(frame, 300000)
-  const secs = ((Date.now() - t0) / 1000).toFixed(1)
-  console.log(`Lasttest: Bereich ${size} in ${secs} s geladen (Software-Grafik, ohne GPU)`)
-  await page.waitForTimeout(800)
-  await page.screenshot({ path: `${OUT}11-last-500.png` })
+  await ordnerGeben(page, page, 'Große Testwelt')
+  await page.locator('#loading').waitFor({ state: 'visible', timeout: 5000 }).catch(() => {})
+  await warteAufLaden(page, 300000)
+  console.log(`Ladezeit große Welt (4 Regionen, Software-Grafik): ${((Date.now() - t0) / 1000).toFixed(1)} s bis Gelände und Karte fertig`)
   await page.close()
-  host.close()
 }
 
-
-// Galerie: je Stil Varianten-Bilder und ein gesetztes Haus in 3D (mit .jar, wenn angegeben)
+// Galerie: je Stil gesetztes Haus in 3D (mit .jar, wenn angegeben), dazu die Varianten
 async function galerie() {
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: 'light', deviceScaleFactor: 2, acceptDownloads: true })
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: 'light', deviceScaleFactor: 2 })
   page.on('pageerror', e => fail(`galerie: ${e.message}`))
-  await page.goto(`http://localhost:${PORT}/?demo`)
-  await page.waitForSelector('.world-name', { timeout: 8000 })
-  await page.waitForTimeout(1000)
-  if (process.env.JAR) {
-    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-act="textures"]')])
-    await chooser.setFiles(process.env.JAR)
-    await page.waitForFunction(() => document.body.textContent.includes('Texturen aus deiner .jar'), null, { timeout: 60000 })
-  }
-  await aufziehen(page, page, -70, -60, 140, 110)
-  await page.click('[data-act="open-area"]')
-  await warteAufGelaende(page)
+  await page.goto(`http://localhost:${PORT}/`)
+  await ordnerGeben(page, page, 'Realm Testwelt')
+  if (process.env.JAR) await page.waitForFunction(() => document.body.textContent.includes('Texturen aus versions'), null, { timeout: 90000 })
+  await warteAufLaden(page)
   const styles = ['mittelalter', 'japan', 'modern', 'wueste', 'steampunk']
   for (const [i, st] of styles.entries()) {
     await page.click(`[data-style="${st}"]`)
     await page.waitForTimeout(600)
-    await page.locator('#side').screenshot({ path: `${OUT}g-${i + 1}-${st}-auswahl.png` })
     await page.locator('.vars').screenshot({ path: `${OUT}g-${i + 1}-${st}-varianten.png`, scale: 'device' })
-    await page.click('#three .map-draw')
-    await page.waitForTimeout(300)
+    await page.click('[data-t="home"]')
+    await page.waitForTimeout(400)
     await page.click('[data-act="start-place"]')
-    const box = await page.locator('#three canvas').boundingBox()
-    const px = box.x + box.width * [0.3, 0.45, 0.6, 0.38, 0.55][i], py = box.y + box.height * [0.55, 0.62, 0.55, 0.72, 0.7][i]
-    await page.mouse.move(px, py)
-    await page.waitForTimeout(300)
-    await page.mouse.click(px, py)
-    await page.waitForSelector('#guide:not([hidden])', { timeout: 5000 })
-    await page.waitForTimeout(500)
+    const at = await zielen(page, page, 0.4 + i * 0.06)
+    await page.mouse.click(...at)
+    await page.locator('#guide:not([hidden])').waitFor({ timeout: 5000 })
     const id = await page.locator('.item[aria-current="true"][data-placement]').getAttribute('data-placement')
     await page.locator(`[data-placement="${id}"]`).click()
-    await page.waitForTimeout(700)
+    await page.waitForTimeout(900)
     await page.locator('#three').screenshot({ path: `${OUT}g-${i + 1}-${st}-3d.png` })
+    await page.click('[data-act="deselect"]')
   }
-  // Natur
-  await page.click('[data-cat="natur"]')
-  await page.waitForTimeout(500)
-  await page.locator('#side').screenshot({ path: `${OUT}g-6-natur-auswahl.png` })
-  await page.click('[data-btype="pinsel"]')
-  await page.waitForTimeout(500)
-  await page.click('#three .map-draw')
-  await page.waitForTimeout(300)
-  await page.click('[data-act="start-place"]')
-  const box = await page.locator('#three canvas').boundingBox()
-  await page.mouse.move(box.x + box.width * 0.75, box.y + box.height * 0.7)
-  await page.waitForTimeout(300)
-  await page.mouse.click(box.x + box.width * 0.75, box.y + box.height * 0.7)
-  await page.waitForTimeout(800)
-  await page.locator('#three').screenshot({ path: `${OUT}g-7-natur-3d.png` })
-
-  // Vorlage: das gesetzte Haus als .litematic exportieren und als "Farm" wieder einlesen (Rundweg Export → Import)
-  await page.locator('[data-placement]').first().click()
-  await page.waitForTimeout(300)
-  const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-act="litematic"]')])
-  await dl.saveAs(`${OUT}probe-farm.litematic`)
-  await page.click('[data-cat="vorlage"]')
-  const [ch] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-act="import-template"]')])
-  await ch.setFiles(`${OUT}probe-farm.litematic`)
-  await page.waitForSelector('[data-template]', { timeout: 5000 })
-  await page.click('[data-act="toggle-facade"]')
-  await page.waitForTimeout(300)
-  await page.locator('#side').screenshot({ path: `${OUT}g-8-vorlage-auswahl.png` })
-  await page.click('#three .map-draw')
-  await page.waitForTimeout(300)
-  await page.click('[data-act="start-place"]')
-  await page.mouse.move(box.x + box.width * 0.45, box.y + box.height * 0.75)
-  await page.waitForTimeout(300)
-  await page.mouse.click(box.x + box.width * 0.45, box.y + box.height * 0.75)
-  await page.waitForSelector('#guide:not([hidden])', { timeout: 5000 })
-  await page.waitForTimeout(600)
-  await page.locator('#three').screenshot({ path: `${OUT}g-9-vorlage-3d.png` })
   await page.close()
 }
 
 try {
   if (process.env.NUR_GALERIE) await galerie()
-  else if (process.env.NUR_LAST) await last()
   else {
+    await run('light', 1440, 900, true)
+    await run('dark', 1440, 900, false)
+    await run('light', 1024, 768, false)
+    await handy()
     await eingebettet()
-    await run('light', 1440, 900)
-    await run('dark', 1440, 900)
-    await run('light', 1024, 700)
-    if (!process.env.OHNE_LAST) await last()
+    await last()
+    if (!process.env.OHNE_GALERIE) await galerie()
   }
 } catch (e) {
-  fail(String(e))
-} finally {
-  await browser.close()
-  server.kill()
+  fail(`Abbruch: ${e.message}`)
 }
-if (errors.length) { console.error(`${errors.length} Fehler`); process.exit(1) }
+await browser.close()
+server.kill()
+if (errors.length) {
+  console.error(`${errors.length} Fehler`)
+  process.exit(1)
+}
 console.log('Rundgang ok, Bilder in test/out/')

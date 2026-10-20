@@ -28,8 +28,16 @@ export interface RegionBlob {
 /** Wie viel Untergrund unter dem tiefsten Oberflächenblock mitgeladen wird. */
 export const UNDERGROUND = 6
 
+// Benachbarte Stücke brauchen dieselben Chunks: die zuletzt gelesenen bleiben im Worker.
+const CACHE_MAX = 512
+const chunkCache = new Map<string, ChunkData | null>()
+const headerCache = new Map<string, Awaited<ReturnType<typeof readHeader>>>()
+
+function fileKey(r: RegionBlob): string {
+  return `${r.rx},${r.rz}|${r.blob.size}|${(r.blob as File).lastModified ?? 0}`
+}
+
 export async function readArea(regions: RegionBlob[], box: Box3): Promise<AreaResult> {
-  const headers = new Map<string, Awaited<ReturnType<typeof readHeader>>>()
   const chunks: ChunkData[] = []
   let missing = 0
 
@@ -37,17 +45,31 @@ export async function readArea(regions: RegionBlob[], box: Box3): Promise<AreaRe
     for (let cx = box.x0 >> 4; cx <= box.x1 >> 4; cx++) {
       const reg = regions.find(r => r.rx === cx >> 5 && r.rz === cz >> 5)
       if (!reg) { missing++; continue }
-      const key = `${reg.rx},${reg.rz}`
-      let header = headers.get(key)
-      if (!header) headers.set(key, (header = await readHeader(reg.blob)))
-      try {
-        const bytes = await readChunkBytes(reg.blob, header, cx, cz, reg.external)
-        const r = bytes ? decodeChunk(bytes) : null
-        if (r?.ok) chunks.push(r.chunk)
-        else missing++
-      } catch {
-        missing++
+      const key = fileKey(reg)
+      const ck = `${key}|${cx},${cz}`
+      let chunk = chunkCache.get(ck)
+      if (chunk === undefined) {
+        let header = headerCache.get(key)
+        if (!header) {
+          headerCache.set(key, (header = await readHeader(reg.blob)))
+          if (headerCache.size > 16) headerCache.delete(headerCache.keys().next().value!)
+        }
+        try {
+          const bytes = await readChunkBytes(reg.blob, header, cx, cz, reg.external)
+          const r = bytes ? decodeChunk(bytes) : null
+          chunk = r?.ok ? r.chunk : null
+        } catch {
+          chunk = null
+        }
+        chunkCache.set(ck, chunk)
+        if (chunkCache.size > CACHE_MAX) chunkCache.delete(chunkCache.keys().next().value!)
+      } else {
+        // zuletzt benutzt ans Ende
+        chunkCache.delete(ck)
+        chunkCache.set(ck, chunk)
       }
+      if (chunk) chunks.push(chunk)
+      else missing++
     }
 
   const out: Box3 = { ...box }

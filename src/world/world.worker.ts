@@ -29,9 +29,9 @@ self.onmessage = async (ev: MessageEvent<WorkerRequest>) => {
       ;(self as unknown as Worker).postMessage(
         {
           id: req.id, ok: true,
-          result: { bitmap, png, trace, tracePng, heights: t.heights, inhabited: t.inhabited, built: t.built, chunks: t.chunks, skipped: t.skipped },
+          result: { bitmap, png, trace, tracePng, heights: t.heights, inhabited: t.inhabited, built: t.built, lodH: t.lodH, lodC: t.lodC, chunks: t.chunks, skipped: t.skipped },
         },
-        [bitmap, trace, t.heights.buffer, t.inhabited.buffer, t.built.buffer],
+        [bitmap, trace, t.heights.buffer, t.inhabited.buffer, t.built.buffer, t.lodH.buffer, t.lodC.buffer],
       )
     } else {
       const regions = req.regions.map(r => ({ rx: r.rx, rz: r.rz, blob: r.blob, external: ext(r.mcc) }))

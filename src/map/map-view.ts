@@ -1,16 +1,16 @@
-// Draufsicht der Welt. Kachelweise, zoom- und verschiebbar. Hier werden Bereiche als Rechteck aufgezogen;
-// gebaut wird erst in der 3D-Ansicht des Bereichs.
+// Karte zum Hinspringen: klein in der Ecke folgt sie der Kamera, groß aufgeklappt lässt sie sich verschieben.
+// Zeigt, wo die Kamera steht und hinschaut, eure Spuren, die Orte mit der meisten Zeit und die Bauwerke.
+// Klick = mit der 3D-Kamera dorthin.
 
 import { boundsOf } from '../blueprint/placement'
-import { addArea, collisions, MAX_AREA, normalizeRect, placedOf, S, toast, update } from '../app/state'
+import { collisions, placedOf, S } from '../app/state'
 import { TILE } from '../world/tile'
 
 const MIN_ZOOM = 1 / 16
-const MAX_ZOOM = 16
+const MAX_ZOOM = 8
 
 interface Colors {
-  empty: string; grid: string; accent: string; accentSoft: string; gap: string; gapSoft: string
-  surface: string; surface2: string; fg: string; fg3: string
+  empty: string; grid: string; accent: string; gap: string; surface: string; surface2: string; fg: string
 }
 
 export class MapView {
@@ -18,18 +18,18 @@ export class MapView {
   private ctx = this.canvas.getContext('2d')!
   cx = 0
   cz = 0
-  zoom = 2
+  zoom = 0.5
   private dirty = true
   private colors!: Colors
   private hover: { x: number; z: number } | null = null
-  private drag: { mode: 'pan' | 'rect'; sx: number; sy: number; cx: number; cz: number; wx: number; wz: number; moved: boolean } | null = null
-  private rect: { x0: number; z0: number; x1: number; z1: number } | null = null
-  /** Zeichenmodus: nächstes Ziehen legt einen Bereich an (auch mit gedrückter Umschalttaste). */
-  drawing = false
-  private centeredFor: string | null = null
-  onOpen3d: (areaId: string) => void = () => {}
+  private drag: { sx: number; sy: number; cx: number; cz: number; moved: boolean } | null = null
+  /** groß aufgeklappt: frei verschiebbar und lädt selbst Kacheln */
+  big = false
+  /** Kamera der 3D-Ansicht (Welt) und Blickrichtung */
+  private cam: { x: number; z: number; heading: number } | null = null
+  onJump: (x: number, z: number) => void = () => {}
 
-  constructor(private host: HTMLElement, private readout: HTMLElement) {
+  constructor(private host: HTMLElement, private readout: HTMLElement | null = null) {
     host.appendChild(this.canvas)
     this.readColors()
     new ResizeObserver(() => this.resize()).observe(host)
@@ -51,21 +51,20 @@ export class MapView {
     this.dirty = true
   }
 
-  /** Beim ersten Öffnen einer Welt auf den Spawn oder die Mitte springen. */
-  sync(): void {
-    const s = S.session
-    if (s && this.centeredFor !== s.key) {
-      this.centeredFor = s.key
-      const sp = s.info.spawn
-      if (sp) {
-        this.cx = sp[0]
-        this.cz = sp[2]
-      } else {
-        const b = s.regionBounds()
-        this.cx = (b.x0 + b.x1) / 2
-        this.cz = (b.z0 + b.z1) / 2
-      }
-      this.zoom = 2
+  setBig(on: boolean): void {
+    this.big = on
+    if (on) this.zoom = Math.max(this.zoom, 0.5)
+    else this.zoom = 0.5
+    if (this.cam) this.focus(this.cam.x, this.cam.z)
+    this.invalidate()
+  }
+
+  /** 3D-Kamera nachführen; klein bleibt die Karte darauf zentriert. */
+  setCamera(x: number, z: number, heading: number): void {
+    this.cam = { x, z, heading }
+    if (!this.big) {
+      this.cx = x
+      this.cz = z
     }
     this.invalidate()
   }
@@ -82,9 +81,11 @@ export class MapView {
     const sx = px ?? r.width / 2, sy = py ?? r.height / 2
     const before = this.toWorld(sx, sy)
     this.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.zoom * f))
-    const after = this.toWorld(sx, sy)
-    this.cx += before.x - after.x
-    this.cz += before.z - after.z
+    if (this.big) {
+      const after = this.toWorld(sx, sy)
+      this.cx += before.x - after.x
+      this.cz += before.z - after.z
+    }
     this.invalidate()
   }
 
@@ -92,8 +93,8 @@ export class MapView {
     const cs = getComputedStyle(document.documentElement)
     const v = (n: string) => cs.getPropertyValue(n).trim()
     this.colors = {
-      empty: v('--map-empty'), grid: v('--map-grid'), accent: v('--accent'), accentSoft: v('--accent-soft'),
-      gap: v('--gap'), gapSoft: v('--gap-soft'), surface: v('--surface'), surface2: v('--surface-2'), fg: v('--fg'), fg3: v('--fg-3'),
+      empty: v('--map-empty'), grid: v('--map-grid'), accent: v('--accent'), gap: v('--gap'),
+      surface: v('--surface'), surface2: v('--surface-2'), fg: v('--fg'),
     }
   }
 
@@ -115,21 +116,6 @@ export class MapView {
     return { sx: (x - this.cx) * this.zoom + r.width / 2, sy: (z - this.cz) * this.zoom + r.height / 2 }
   }
 
-  private areaAt(x: number, z: number): string | null {
-    for (const a of [...S.project.areas].reverse()) {
-      if (x >= a.x0 && x <= a.x1 && z >= a.z0 && z <= a.z1) return a.id
-    }
-    return null
-  }
-
-  setDrawing(on: boolean): void {
-    this.drawing = on
-    this.canvas.style.cursor = on ? 'crosshair' : ''
-    this.host.classList.toggle('drawing', on)
-    this.updateReadout()
-    this.invalidate()
-  }
-
   private bind(): void {
     const c = this.canvas
     c.addEventListener('wheel', e => {
@@ -141,11 +127,8 @@ export class MapView {
     c.addEventListener('pointerdown', e => {
       if (e.button !== 0) return
       const r = c.getBoundingClientRect()
-      const sx = e.clientX - r.left, sy = e.clientY - r.top
-      const w = this.toWorld(sx, sy)
       c.setPointerCapture(e.pointerId)
-      const rect = (this.drawing || e.shiftKey) && !!S.session
-      this.drag = { mode: rect ? 'rect' : 'pan', sx, sy, cx: this.cx, cz: this.cz, wx: Math.floor(w.x), wz: Math.floor(w.z), moved: false }
+      this.drag = { sx: e.clientX - r.left, sy: e.clientY - r.top, cx: this.cx, cz: this.cz, moved: false }
     })
 
     c.addEventListener('pointermove', e => {
@@ -156,48 +139,23 @@ export class MapView {
       const d = this.drag
       if (d) {
         if (Math.hypot(sx - d.sx, sy - d.sy) > 4) d.moved = true
-        if (d.mode === 'pan' && d.moved) {
+        if (d.moved && this.big) {
           this.cx = d.cx - (sx - d.sx) / this.zoom
           this.cz = d.cz - (sy - d.sy) / this.zoom
-        } else if (d.mode === 'rect') {
-          this.rect = normalizeRect(d.wx, d.wz, this.hover.x, this.hover.z)
         }
       }
       this.updateReadout()
-      c.style.cursor = this.drawing || e.shiftKey ? 'crosshair' : d?.mode === 'pan' && d.moved ? 'grabbing' : this.areaAt(this.hover.x, this.hover.z) ? 'pointer' : 'grab'
+      c.style.cursor = d?.moved && this.big ? 'grabbing' : 'pointer'
       this.invalidate()
     })
 
     c.addEventListener('pointerup', e => {
       const d = this.drag
       this.drag = null
-      if (!d) return
+      if (!d || d.moved) return
       const r = c.getBoundingClientRect()
       const w = this.toWorld(e.clientX - r.left, e.clientY - r.top)
-      const x = Math.floor(w.x), z = Math.floor(w.z)
-      if (d.mode === 'rect') {
-        const rect = normalizeRect(d.wx, d.wz, x, z)
-        this.rect = null
-        this.setDrawing(false)
-        if (rect.x1 - rect.x0 < 3 || rect.z1 - rect.z0 < 3) {
-          toast('Zum Aufziehen mit gedrückter Maus ein Rechteck ziehen.')
-        } else {
-          addArea(rect)
-          if (rect.clipped) toast(`Auf ${MAX_AREA} × ${MAX_AREA} Blöcke begrenzt.`)
-        }
-      } else if (!d.moved) {
-        const id = this.areaAt(x, z)
-        S.sel = id ? { kind: 'area', id } : null
-        update()
-      }
-      this.invalidate()
-    })
-
-    c.addEventListener('dblclick', e => {
-      const r = c.getBoundingClientRect()
-      const w = this.toWorld(e.clientX - r.left, e.clientY - r.top)
-      const id = this.areaAt(Math.floor(w.x), Math.floor(w.z))
-      if (id) this.onOpen3d(id)
+      this.onJump(Math.floor(w.x), Math.floor(w.z))
     })
 
     c.addEventListener('pointerleave', () => {
@@ -208,14 +166,9 @@ export class MapView {
   }
 
   private updateReadout(): void {
-    if (S.view !== 'map') return
-    if (this.rect) {
-      const r = this.rect
-      this.readout.innerHTML = `<b>${r.x1 - r.x0 + 1} × ${r.z1 - r.z0 + 1}</b> Blöcke`
-      return
-    }
-    if (!this.hover) {
-      this.readout.textContent = this.drawing ? 'Rechteck mit gedrückter Maus aufziehen' : ''
+    if (!this.readout) return
+    if (!this.hover || !this.big) {
+      this.readout.textContent = ''
       return
     }
     const { x, z } = this.hover
@@ -234,13 +187,13 @@ export class MapView {
     ctx.fillStyle = this.colors.empty
     ctx.fillRect(0, 0, W, H)
     const s = S.session
-    if (!s) return
+    if (!s || W < 4) return
 
     const tl = this.toWorld(0, 0), br = this.toWorld(W, H)
     const rx0 = Math.floor(tl.x / TILE), rx1 = Math.floor(br.x / TILE), rz0 = Math.floor(tl.z / TILE), rz1 = Math.floor(br.z / TILE)
-    s.setView(this.cx, this.cz, rx0, rz0, rx1, rz1)
+    // groß und verschoben: die Karte bestimmt, was zuerst lädt
+    if (this.big) s.setView(this.cx, this.cz, rx0, rz0, rx1, rz1)
     ctx.imageSmoothingEnabled = this.zoom < 1
-    let loading = false
     const size = TILE * this.zoom
     for (let rz = rz0; rz <= rz1; rz++)
       for (let rx = rx0; rx <= rx1; rx++) {
@@ -253,9 +206,7 @@ export class MapView {
           ctx.fillRect(p.sx, p.sy, size, size)
           if (t.state === 'error') this.hatch(p.sx, p.sy, size, size, this.colors.gap)
         }
-        if (t.state === 'loading' || t.state === 'idle' || t.stale || t.restoring) loading = true
       }
-    this.host.classList.toggle('is-loading', loading)
 
     // Spuren: wo ihr wart (zart) und wo oben Gebautes liegt (kräftig)
     if (S.traces) {
@@ -267,120 +218,78 @@ export class MapView {
           const p = this.toScreen(rx * TILE, rz * TILE)
           ctx.drawImage(t.trace, p.sx, p.sy, size, size)
         }
-      s.hotspots().forEach((h, i) => {
-        const p = this.toScreen(h.x, h.z)
-        if (p.sx < -40 || p.sy < -40 || p.sx > W + 40 || p.sy > H + 40) return
-        this.pin(p.sx, p.sy, String(i + 1))
-      })
     }
 
-    // Chunk-Raster beim Reinzoomen
-    if (this.zoom >= 3) {
-      ctx.strokeStyle = this.colors.grid
-      ctx.lineWidth = 1
-      ctx.beginPath()
-      for (let x = Math.floor(tl.x / 16) * 16; x <= br.x; x += 16) {
-        const sx = Math.round(this.toScreen(x, 0).sx) + 0.5
-        ctx.moveTo(sx, 0)
-        ctx.lineTo(sx, H)
-      }
-      for (let z = Math.floor(tl.z / 16) * 16; z <= br.z; z += 16) {
-        const sy = Math.round(this.toScreen(0, z).sy) + 0.5
-        ctx.moveTo(0, sy)
-        ctx.lineTo(W, sy)
-      }
-      ctx.stroke()
-    }
-
-    // Bereiche
-    for (const a of S.project.areas) {
-      const p = this.toScreen(a.x0, a.z0)
-      const q = this.toScreen(a.x1 + 1, a.z1 + 1)
-      const sel = (S.sel?.kind === 'area' && S.sel.id === a.id) || S.openArea === a.id
-      ctx.fillStyle = this.colors.accentSoft
-      ctx.globalAlpha = sel ? 1 : 0.6
-      ctx.fillRect(p.sx, p.sy, q.sx - p.sx, q.sy - p.sy)
-      ctx.globalAlpha = 1
-      ctx.strokeStyle = this.colors.accent
-      ctx.lineWidth = sel ? 2.5 : 1.5
-      ctx.setLineDash(sel ? [] : [6, 4])
-      ctx.strokeRect(p.sx, p.sy, q.sx - p.sx, q.sy - p.sy)
-      ctx.setLineDash([])
-      this.label(`${a.name} · ${a.x1 - a.x0 + 1} × ${a.z1 - a.z0 + 1}`, p.sx + 8, p.sy - 14, sel)
-    }
-
-    // Grundrisse der Bauwerke
+    // Bauwerke
     const hits = collisions()
     for (const pl of S.project.placements) {
       const b = boundsOf(placedOf(pl).placed)
       const a = this.toScreen(b.min[0], b.min[2])
       const c = this.toScreen(b.max[0] + 1, b.max[2] + 1)
-      const bad = hits.has(pl.id)
-      ctx.fillStyle = bad ? this.colors.gapSoft : this.colors.accent
-      ctx.globalAlpha = bad ? 1 : 0.55
-      ctx.fillRect(a.sx, a.sy, c.sx - a.sx, c.sy - a.sy)
+      const w = Math.max(3, c.sx - a.sx), h = Math.max(3, c.sy - a.sy)
+      ctx.fillStyle = hits.has(pl.id) ? this.colors.gap : this.colors.accent
+      ctx.globalAlpha = S.sel?.id === pl.id ? 1 : 0.75
+      ctx.fillRect(a.sx, a.sy, w, h)
       ctx.globalAlpha = 1
-      if (bad) this.hatch(a.sx, a.sy, c.sx - a.sx, c.sy - a.sy, this.colors.gap)
-      ctx.strokeStyle = bad ? this.colors.gap : this.colors.accent
-      ctx.lineWidth = 1.5
-      ctx.strokeRect(a.sx, a.sy, c.sx - a.sx, c.sy - a.sy)
-    }
-
-    // Rechteck, das gerade aufgezogen wird
-    if (this.rect) {
-      const p = this.toScreen(this.rect.x0, this.rect.z0)
-      const q = this.toScreen(this.rect.x1 + 1, this.rect.z1 + 1)
-      ctx.fillStyle = this.colors.accentSoft
-      ctx.fillRect(p.sx, p.sy, q.sx - p.sx, q.sy - p.sy)
-      ctx.strokeStyle = this.colors.accent
-      ctx.lineWidth = 2
-      ctx.strokeRect(p.sx, p.sy, q.sx - p.sx, q.sy - p.sy)
-    }
-
-    // Block unter der Maus
-    if (this.hover && this.zoom >= 2) {
-      const p = this.toScreen(this.hover.x, this.hover.z)
-      ctx.strokeStyle = this.colors.fg
-      ctx.globalAlpha = 0.5
+      ctx.strokeStyle = this.colors.surface
       ctx.lineWidth = 1
-      ctx.strokeRect(p.sx + 0.5, p.sy + 0.5, this.zoom - 1, this.zoom - 1)
+      ctx.strokeRect(a.sx - 0.5, a.sy - 0.5, w + 1, h + 1)
+    }
+
+    if (S.traces) {
+      s.hotspots().forEach((h, i) => {
+        const p = this.toScreen(h.x, h.z)
+        if (p.sx < -20 || p.sy < -20 || p.sx > W + 20 || p.sy > H + 20) return
+        this.pin(p.sx, p.sy, String(i + 1), this.big ? 11 : 8)
+      })
+    }
+
+    // Kamera: Punkt mit Blickkegel
+    if (this.cam) {
+      const p = this.toScreen(this.cam.x, this.cam.z)
+      const a = this.cam.heading
+      const len = this.big ? 26 : 18
+      ctx.save()
+      ctx.translate(p.sx, p.sy)
+      ctx.rotate(a)
+      ctx.beginPath()
+      ctx.moveTo(0, 0)
+      ctx.arc(0, 0, len, -Math.PI / 2 - 0.5, -Math.PI / 2 + 0.5)
+      ctx.closePath()
+      ctx.fillStyle = this.colors.fg
+      ctx.globalAlpha = 0.18
+      ctx.fill()
       ctx.globalAlpha = 1
+      ctx.restore()
+      ctx.beginPath()
+      ctx.arc(p.sx, p.sy, 5, 0, Math.PI * 2)
+      ctx.fillStyle = this.colors.fg
+      ctx.fill()
+      ctx.lineWidth = 2
+      ctx.strokeStyle = this.colors.surface
+      ctx.stroke()
     }
   }
 
   /** Nummerierte Stecknadel für einen Ort aus „Hier wart ihr am meisten“. */
-  private pin(x: number, y: number, text: string): void {
+  private pin(x: number, y: number, text: string, r: number): void {
     const ctx = this.ctx
     ctx.beginPath()
-    ctx.arc(x, y, 11, 0, Math.PI * 2)
+    ctx.arc(x, y, r, 0, Math.PI * 2)
     ctx.fillStyle = this.colors.accent
     ctx.fill()
     ctx.lineWidth = 2
     ctx.strokeStyle = this.colors.surface
     ctx.stroke()
     ctx.fillStyle = this.colors.surface
-    ctx.font = '600 12px Geist, system-ui, sans-serif'
+    ctx.font = `600 ${r > 9 ? 12 : 10}px Geist, system-ui, sans-serif`
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
     ctx.fillText(text, x, y + 0.5)
     ctx.textAlign = 'start'
   }
 
-  private label(text: string, x: number, y: number, strong: boolean): void {
-    const ctx = this.ctx
-    ctx.font = `${strong ? 600 : 500} 12px Geist, system-ui, sans-serif`
-    const w = ctx.measureText(text).width
-    ctx.fillStyle = this.colors.surface
-    ctx.globalAlpha = 0.92
-    roundRect(ctx, x - 6, y - 10, w + 12, 20, 10)
-    ctx.fill()
-    ctx.globalAlpha = 1
-    ctx.fillStyle = this.colors.fg
-    ctx.textBaseline = 'middle'
-    ctx.fillText(text, x, y + 0.5)
-  }
-
-  /** 135°-Schraffur: "anders als der Rest", damit Kollisionen nicht nur an der Farbe hängen. */
+  /** 135°-Schraffur: "anders als der Rest", damit Fehler nicht nur an der Farbe hängen. */
   private hatch(x: number, y: number, w: number, h: number, color: string): void {
     const ctx = this.ctx
     ctx.save()
@@ -406,14 +315,4 @@ export function duration(secs: number): string {
   if (m < 60) return `${Math.round(m)} Min.`
   const h = m / 60
   return `${h < 10 ? h.toFixed(1).replace('.', ',') : Math.round(h)} Std.`
-}
-
-function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
-  ctx.beginPath()
-  ctx.moveTo(x + r, y)
-  ctx.arcTo(x + w, y, x + w, y + h, r)
-  ctx.arcTo(x + w, y + h, x, y + h, r)
-  ctx.arcTo(x, y + h, x, y, r)
-  ctx.arcTo(x, y, x + w, y, r)
-  ctx.closePath()
 }

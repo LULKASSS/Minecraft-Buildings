@@ -1,5 +1,5 @@
-// Ein Zustand S für die ganze App. Änderungen über update(), danach zeichnen sich die Bereiche neu.
-// Ablauf: Bereich auf der Karte aufziehen → Bereich in 3D laden und durchfliegen → dort Bauwerke platzieren.
+// Ein Zustand S für die ganze App. Änderungen über update(), danach zeichnet sich die Oberfläche neu.
+// Ablauf: Welt laden → sofort 3D → umsehen oder fliegen → Bauwerk setzen → anklicken = Anleitung.
 
 import type { Vec3 } from '../blueprint/blueprint'
 import { boundsOf, layersOf, overlaps, place, type Bounds, type Layer, type Placed, type Placement } from '../blueprint/placement'
@@ -12,24 +12,13 @@ import type { BlueprintSource } from '../blueprint/blueprint'
 import type { WorldSession } from './world-session'
 import * as store from './store'
 
-/** Rechteckiger Bereich der Welt, Ecken einschließlich. */
-export interface Area {
-  id: string
-  name: string
-  x0: number
-  z0: number
-  x1: number
-  z1: number
-}
-
-export const MAX_AREA = 512
-
 export interface Project {
   worldKey: string
   worldName: string
   dataVersion: number
-  areas: Area[]
   placements: Placement[]
+  /** wo die Kamera zuletzt hinsah (Drehpunkt) und aus welchem Abstand */
+  camera?: { x: number; y: number; z: number; dist: number }
   /** gelernte Paletten */
   palettes?: Palette[]
   updatedAt: number
@@ -50,17 +39,18 @@ export interface BuildChoice {
   pick: number
 }
 
-export type Selection = { kind: 'area' | 'placement'; id: string } | null
+export type Selection = { kind: 'placement'; id: string } | null
 
 export interface State {
   theme: 'system' | 'light' | 'dark'
-  view: 'map' | '3d'
+  /** große Karte über der 3D-Ansicht (zum Hinspringen) */
+  bigMap: boolean
+  /** Kamera: umsehen oder Flugmodus */
+  camMode: 'orbit' | 'fly'
   session: WorldSession | null
   busy: string | null
   project: Project
   sel: Selection
-  /** Bereich, der gerade in 3D offen ist */
-  openArea: string | null
   /** Bauwerk-Typ, der gerade in 3D an den Mauszeiger gehängt ist */
   placing: string | null
   build: BuildChoice
@@ -69,6 +59,9 @@ export interface State {
   textures: 'none' | 'loading' | 'ready'
   /** Spuren auf der Karte: wo ihr wart und gebaut habt */
   traces: boolean
+  /** woher die Texturen kommen, für die Anzeige */
+  texturesFrom: string | null
+  panelCollapsed: boolean
 }
 
 export const DEMO_DATA_VERSION = 4786 // 26.1
@@ -96,23 +89,25 @@ export function choiceSource(b: BuildChoice = S.build, seed = b.seeds[b.pick]): 
 }
 
 function emptyProject(worldKey = '', worldName = '', dataVersion = DEMO_DATA_VERSION): Project {
-  return { worldKey, worldName, dataVersion, areas: [], placements: [], updatedAt: Date.now() }
+  return { worldKey, worldName, dataVersion, placements: [], updatedAt: Date.now() }
 }
 
 export const S: State = {
   theme: 'system',
-  view: 'map',
+  bigMap: false,
+  camMode: 'orbit',
   session: null,
   busy: null,
   project: emptyProject(),
   sel: null,
-  openArea: null,
   placing: null,
   build: { cat: 'gebaeude', type: 'haus', style: 'mittelalter', palette: 'mittel-eiche', size: 'M', species: 'oak', mix: 'wald', templateId: null, facade: false, seeds: newSeeds(), pick: 0 },
   guide: { layer: null, single: false, playing: false, tab: 'layer' },
   savedFolder: null,
   textures: 'none',
   traces: true,
+  texturesFrom: null,
+  panelCollapsed: false,
 }
 
 type Listener = (s: State) => void
@@ -137,6 +132,12 @@ export function update(fn?: (s: State) => void): void {
 
 let saveTimer: number | undefined
 
+/** Kamera merken, damit die Welt beim nächsten Öffnen dort weitergeht (ohne neu zu zeichnen). */
+export function rememberCamera(c: { x: number; y: number; z: number; dist: number }): void {
+  S.project.camera = { x: Math.round(c.x), y: Math.round(c.y), z: Math.round(c.z), dist: Math.round(c.dist) }
+  saveProject()
+}
+
 export function saveProject(): void {
   S.project.updatedAt = Date.now()
   if (!S.project.worldKey) return
@@ -146,14 +147,13 @@ export function saveProject(): void {
 }
 
 export async function loadProject(worldKey: string, worldName: string, dataVersion: number): Promise<void> {
-  const p = await store.get<Project & { markers?: unknown }>('kv', `project:${worldKey}`)
-  S.project = p ? { ...p, areas: p.areas ?? [], worldName, dataVersion } : emptyProject(worldKey, worldName, dataVersion)
+  const p = await store.get<Project & { areas?: unknown }>('kv', `project:${worldKey}`)
+  if (p) delete p.areas // Bereiche gab es bis Fassung 5, die Bauwerke darin bleiben
+  S.project = p ? { ...p, worldName, dataVersion } : emptyProject(worldKey, worldName, dataVersion)
   setCustomPalettes(S.project.palettes ?? [])
-  // Bauwerke aus Fassung 1/2 hingen an Punkten statt an Bereichen: ohne Bereich nicht mehr erreichbar
-  S.project.placements = S.project.placements.filter(pl => pl.areaId && S.project.areas.some(a => a.id === pl.areaId))
   S.sel = null
-  S.openArea = null
   S.placing = null
+  S.bigMap = false
   placedCache.clear()
 }
 
@@ -197,71 +197,17 @@ export function selectedPlacement(): Placement | null {
   return S.project.placements.find(p => p.id === S.sel!.id) ?? null
 }
 
-export function selectedArea(): Area | null {
-  if (S.sel?.kind !== 'area') return null
-  return S.project.areas.find(a => a.id === S.sel!.id) ?? null
-}
-
-export function openArea(): Area | null {
-  return S.project.areas.find(a => a.id === S.openArea) ?? null
-}
-
-export function placementsIn(areaId: string): Placement[] {
-  return S.project.placements.filter(p => p.areaId === areaId)
-}
-
 // ---------- Aktionen ----------
 
 export function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
 }
 
-/** Rechteck aus zwei Ecken, auf höchstens MAX_AREA × MAX_AREA begrenzt. */
-export function normalizeRect(ax: number, az: number, bx: number, bz: number): { x0: number; z0: number; x1: number; z1: number; clipped: boolean } {
-  let x0 = Math.min(ax, bx), x1 = Math.max(ax, bx), z0 = Math.min(az, bz), z1 = Math.max(az, bz)
-  let clipped = false
-  if (x1 - x0 + 1 > MAX_AREA) { x1 = x0 + MAX_AREA - 1; clipped = true }
-  if (z1 - z0 + 1 > MAX_AREA) { z1 = z0 + MAX_AREA - 1; clipped = true }
-  return { x0, z0, x1, z1, clipped }
-}
-
-export function addArea(r: { x0: number; z0: number; x1: number; z1: number }): Area {
-  const n = S.project.areas.length + 1
-  const a: Area = { id: uid('a'), name: `Bereich ${n}`, x0: r.x0, z0: r.z0, x1: r.x1, z1: r.z1 }
-  S.project.areas.push(a)
-  S.sel = { kind: 'area', id: a.id }
-  saveProject()
-  update()
-  return a
-}
-
-export function renameArea(id: string, name: string): void {
-  const a = S.project.areas.find(a => a.id === id)
-  if (!a) return
-  a.name = name.trim() || a.name
-  saveProject()
-  update()
-}
-
-export function deleteArea(id: string): void {
-  S.project.areas = S.project.areas.filter(a => a.id !== id)
-  for (const p of placementsIn(id)) placedCache.delete(p.id)
-  S.project.placements = S.project.placements.filter(p => p.areaId !== id)
-  if (S.sel?.id === id) S.sel = null
-  if (S.openArea === id) {
-    S.openArea = null
-    S.view = 'map'
-  }
-  saveProject()
-  update()
-}
-
-export function addPlacement(areaId: string, source: BlueprintSource, label: string, pos: Vec3, rotation: Rotation): Placement {
-  const n = placementsIn(areaId).filter(p => p.name.startsWith(label)).length + 1
+export function addPlacement(source: BlueprintSource, label: string, pos: Vec3, rotation: Rotation): Placement {
+  const n = S.project.placements.filter(p => p.name.startsWith(label)).length + 1
   const p: Placement = {
     id: uid('p'),
     name: n === 1 ? label : `${label} ${n}`,
-    areaId,
     source: JSON.parse(JSON.stringify(source)),
     pos,
     rotation,
@@ -309,10 +255,9 @@ export function renamePlacement(id: string, name: string): void {
 }
 
 export function deletePlacement(id: string): void {
-  const p = S.project.placements.find(p => p.id === id)
   S.project.placements = S.project.placements.filter(p => p.id !== id)
   placedCache.delete(id)
-  if (S.sel?.id === id) S.sel = p?.areaId ? { kind: 'area', id: p.areaId } : null
+  if (S.sel?.id === id) S.sel = null
   saveProject()
   update()
 }

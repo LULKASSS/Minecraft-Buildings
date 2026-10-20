@@ -20,6 +20,10 @@ export interface TileResult {
   inhabited: Float32Array
   /** je Chunk: Spalten, deren oberster Block gebaut ist (nicht natürlich) */
   built: Uint16Array
+  /** Ferne in 3D: höchster Block je 4 × 4 Spalten (TRACE × TRACE), NO_SURFACE = leer */
+  lodH: Int16Array
+  /** Farbe dieses höchsten Blocks (RGB) */
+  lodC: Uint8Array
   chunks: number
   skipped: { legacy: number; incomplete: number; errors: string[] }
 }
@@ -34,7 +38,8 @@ export async function renderTile(blob: Blob, rx: number, rz: number, color: Colo
   const builtMask = new Uint8Array(TILE * TILE)
   const res: TileResult = {
     rgba: new Uint8ClampedArray(TILE * TILE * 4), trace: new Uint8ClampedArray(TRACE * TRACE * 4), heights,
-    inhabited: new Float32Array(1024), built: new Uint16Array(1024), chunks: 0, skipped: { legacy: 0, incomplete: 0, errors: [] },
+    inhabited: new Float32Array(1024), built: new Uint16Array(1024),
+    lodH: new Int16Array(TRACE * TRACE).fill(NO_SURFACE), lodC: new Uint8Array(TRACE * TRACE * 3), chunks: 0, skipped: { legacy: 0, incomplete: 0, errors: [] },
   }
 
   for (let lz = 0; lz < 32; lz++)
@@ -81,7 +86,32 @@ export async function renderTile(blob: Blob, rx: number, rz: number, color: Colo
       res.rgba[i * 4 + 3] = 255
     }
   paintTrace(res, builtMask)
+  paintLod(res)
   return res
+}
+
+/** Grobes Höhenfeld für die Ferne: je Zelle der höchste Block und seine (schattierte) Farbe. */
+function paintLod(res: TileResult): void {
+  const f = TILE / TRACE
+  for (let tz = 0; tz < TRACE; tz++)
+    for (let tx = 0; tx < TRACE; tx++) {
+      let best = -1, bh = NO_SURFACE
+      for (let z = 0; z < f; z++)
+        for (let x = 0; x < f; x++) {
+          const i = tx * f + x + (tz * f + z) * TILE
+          const h = res.heights[i]
+          if (h !== NO_SURFACE && (best < 0 || h > bh)) {
+            best = i
+            bh = h
+          }
+        }
+      if (best < 0) continue
+      const c = tx + tz * TRACE
+      res.lodH[c] = bh
+      res.lodC[c * 3] = res.rgba[best * 4]
+      res.lodC[c * 3 + 1] = res.rgba[best * 4 + 1]
+      res.lodC[c * 3 + 2] = res.rgba[best * 4 + 2]
+    }
 }
 
 /** Spuren: Chunks, in denen ihr lange wart, leicht eingefärbt; gebaute Blöcke kräftig. */

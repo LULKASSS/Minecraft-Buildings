@@ -36,11 +36,15 @@ export function decodeChunk(bytes: Uint8Array): ChunkResult {
   if (status && status !== 'minecraft:full' && status !== 'full') return { ok: false, reason: 'incomplete' }
 
   const rawSections = (root.sections as NbtObject[] | undefined) ?? []
-  let minSec = typeof root.yPos === 'number' ? root.yPos : Infinity
+  // Unterkante der Welt aus yPos. Abschnitte nur mit Licht (z. B. Y = -5 und 20) zählen nicht mit,
+  // sonst verschiebt sich alles um 16 Blöcke.
+  const hasY = typeof root.yPos === 'number'
+  let minSec = hasY ? (root.yPos as number) : Infinity
   let maxSec = -Infinity
   for (const s of rawSections) {
+    if (!s.block_states) continue
     const y = Number(s.Y)
-    if (y < minSec) minSec = y
+    if (!hasY && y < minSec) minSec = y
     if (y > maxSec) maxSec = y
   }
   if (!Number.isFinite(minSec)) minSec = -4
@@ -60,7 +64,8 @@ export function decodeChunk(bytes: Uint8Array): ChunkResult {
       sec.raw = bs.data
       sec.bits = Math.max(4, Math.ceil(Math.log2(pal.length)))
     }
-    sections[Number(s.Y) - minSec] = sec
+    const i = Number(s.Y) - minSec
+    if (i >= 0 && i < count) sections[i] = sec
   }
 
   const chunk: ChunkData = {
@@ -76,13 +81,20 @@ export function decodeChunk(bytes: Uint8Array): ChunkResult {
 
   const hm = (root.Heightmaps as NbtObject | undefined)?.WORLD_SURFACE
   if (hm instanceof Int32Array && hm.length > 0) {
-    const bits = Math.ceil(Math.log2(chunk.height + 1))
-    const raw = unpackAligned(hm, bits, 256)
+    // Bitbreite hängt an der Höhe der Dimension (384 → 9), nicht an den gespeicherten Abschnitten:
+    // aus der Zahl der Longs zurückrechnen.
+    const raw = unpackAligned(hm, heightmapBits(hm.length / 2), 256)
     for (let i = 0; i < 256; i++) chunk.surface[i] = raw[i] === 0 ? NO_SURFACE : chunk.minY + raw[i]
   } else {
     computeSurface(chunk)
   }
   return { ok: true, chunk }
+}
+
+/** Bitbreite einer Heightmap mit 256 Einträgen aus der Zahl der Longs (Einträge laufen nicht über Long-Grenzen). */
+export function heightmapBits(longs: number): number {
+  for (let b = 1; b <= 16; b++) if (Math.ceil(256 / Math.floor(64 / b)) === longs) return b
+  return 9
 }
 
 function computeSurface(c: ChunkData): void {

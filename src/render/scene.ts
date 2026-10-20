@@ -1,12 +1,18 @@
-// 3D-Ansicht eines Bereichs: das ganze Gelände in Stücken, frei durchfliegbar, darin die Bauwerke.
+// 3D-Welt: nahes Gelände in Blöcken, die Ferne als grobe Säulen, darin die Bauwerke.
+// Kamera wie bei der Marineford-Seite: ziehen = umsehen, Rad = näher/weiter, F = Flugmodus mit Fadenkreuz.
 // Koordinaten in der Szene sind Weltkoordinaten minus "base", damit Float32 auch weit draußen genau bleibt.
 
 import * as THREE from 'three'
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import type { Vec3 } from '../blueprint/blueprint'
 import { parseState, shortName, type BlockState } from '../blueprint/blockstate'
 import { FlyControls } from './fly'
+import { DetailMask, lodMaterial, type LodMesh } from './lod'
 import type { MeshData } from './mesher'
 import type { TexturedMesher } from './textured'
+
+export type CamMode = 'orbit' | 'fly'
+const PIECE = 32
 
 export interface Aim {
   /** getroffener Block in Weltkoordinaten */
@@ -28,10 +34,15 @@ export interface BuildingMeshes {
 export class Scene3D {
   private renderer: THREE.WebGLRenderer
   private scene = new THREE.Scene()
-  readonly camera = new THREE.PerspectiveCamera(70, 1, 0.05, 1200)
+  readonly camera = new THREE.PerspectiveCamera(60, 1, 0.1, 9000)
   readonly fly: FlyControls
+  readonly orbit: OrbitControls
+  mode: CamMode = 'orbit'
   base: Vec3 = [0, 0, 0]
   private pieces = new Map<string, THREE.Mesh>()
+  private lods = new Map<string, THREE.Mesh>()
+  readonly mask = new DetailMask(PIECE)
+  private lodMat = lodMaterial(this.mask)
   private buildings = new Map<string, { key: string; group: THREE.Group; layers: THREE.Group[] }>()
   private ghost: THREE.Group | null = null
   private outline: THREE.LineSegments
@@ -49,8 +60,9 @@ export class Scene3D {
   onAim: (a: (Aim & { face: Vec3 }) | null) => void = () => {}
   onClick: (a: (Aim & { face: Vec3 }) | null) => void = () => {}
   onMove: () => void = () => {}
+  onMode: (m: CamMode) => void = () => {}
 
-  constructor(private host: HTMLElement) {
+  constructor(readonly host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true })
     this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1))
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
@@ -58,10 +70,27 @@ export class Scene3D {
     this.renderer.domElement.tabIndex = 0
 
     this.fly = new FlyControls(this.camera, this.renderer.domElement)
+    this.fly.enabled = false
     this.fly.onChange = () => {
       this.needsRender = true
       this.onMove()
     }
+
+    this.orbit = new OrbitControls(this.camera, this.renderer.domElement)
+    this.orbit.enableDamping = true
+    this.orbit.dampingFactor = 0.14
+    this.orbit.screenSpacePanning = false
+    this.orbit.zoomToCursor = true
+    this.orbit.minDistance = 4
+    this.orbit.maxDistance = 2600
+    this.orbit.maxPolarAngle = Math.PI * 0.49
+    this.orbit.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }
+    this.orbit.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN }
+    this.orbit.addEventListener('change', () => {
+      this.needsRender = true
+      this.needsAim = true
+      this.onMove()
+    })
 
     this.makeMaterials()
     const edges = new THREE.EdgesGeometry(new THREE.BoxGeometry(1.004, 1.004, 1.004))
@@ -94,22 +123,38 @@ export class Scene3D {
       this.mouse = null
       this.needsAim = true
     })
+    const toNdc = (e: PointerEvent) => {
+      const r = c.getBoundingClientRect()
+      return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1)
+    }
     c.addEventListener('pointerdown', e => (down = { x: e.clientX, y: e.clientY }))
     c.addEventListener('pointerup', e => {
       const click = down && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5
       down = null
       if (!click) return
+      // Tippen am Handy: vorher gab es keine Mausbewegung, Ziel also aus dem Tipp selbst
+      if (e.pointerType !== 'mouse' || !this.mouse) this.mouse = toNdc(e)
       this.updateAim()
       this.onClick(this.aim)
     })
-    c.addEventListener('dblclick', () => void this.fly.lock())
+    c.addEventListener('dblclick', e => {
+      // Doppelklick: dorthin fliegen (auch auf die Ferne)
+      if (this.mode !== 'orbit') return
+      const r = c.getBoundingClientRect()
+      const hit = this.pick(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), true)
+      if (hit) this.glideTo(hit.point)
+    })
+    c.addEventListener('contextmenu', e => e.preventDefault())
 
     const loop = (t: number) => {
       const dt = Math.min(0.1, (t - this.last) / 1000)
       this.last = t
       if (this.host.offsetParent !== null) {
-        if (this.fly.update(dt)) this.needsAim = true
-        if (this.needsAim || this.fly.locked) {
+        if (this.mode === 'fly' ? this.fly.update(dt) : this.walk(dt)) this.needsAim = true
+        if (this.glide) this.stepGlide(dt)
+        if (this.mode === 'orbit' && this.orbit.update()) this.needsAim = true
+        this.updateFog()
+        if (this.needsAim || this.mode === 'fly') {
           if (++this.frame % 2 === 0 || this.needsAim) this.updateAim()
           this.needsAim = false
         }
@@ -127,11 +172,149 @@ export class Scene3D {
 
   private lockChanged(): void {
     const locked = this.fly.locked
-    this.crosshair.hidden = !locked
-    this.hint.innerHTML = locked
-      ? '<b>WASD</b> fliegen · <b>Leertaste</b>/<b>Shift</b> hoch/runter · <b>Strg</b> schneller · <b>Esc</b> Maus frei'
-      : '<b>Ziehen</b> umsehen · <b>WASD</b> fliegen · <b>Leertaste</b>/<b>Shift</b> hoch/runter · <b>Doppelklick</b> Maus fangen'
+    // Esc gibt die Maus frei: zurück zum Umsehen
+    if (!locked && this.mode === 'fly' && this.wasLocked) this.setMode('orbit')
+    this.wasLocked = locked
+    this.crosshair.hidden = this.mode !== 'fly'
+    this.hint.innerHTML = this.mode === 'fly'
+      ? '<b>WASD</b> fliegen · <b>Leertaste</b>/<b>Shift</b> hoch/runter · <b>Strg</b> schneller · <b>Klick</b> setzen/wählen · <b>F</b> zurück'
+      : '<b>Ziehen</b> umsehen · <b>Rechts ziehen</b> verschieben · <b>Rad</b> näher/weiter · <b>Doppelklick</b> hinfliegen · <b>F</b> Flugmodus mit Fadenkreuz'
     this.needsAim = true
+  }
+
+  private wasLocked = false
+
+  /** Umsehen (Kamera kreist um einen Punkt) oder Flugmodus mit Fadenkreuz. */
+  setMode(m: CamMode): void {
+    if (m === this.mode) return
+    this.mode = m
+    this.glide = null
+    if (m === 'fly') {
+      this.orbit.enabled = false
+      this.fly.enabled = true
+      const d = new THREE.Vector3()
+      this.camera.getWorldDirection(d)
+      this.fly.yaw = Math.atan2(-d.x, -d.z)
+      this.fly.pitch = Math.asin(Math.max(-1, Math.min(1, d.y)))
+      this.fly.apply()
+      void this.fly.lock()
+    } else {
+      this.fly.enabled = false
+      if (document.pointerLockElement) document.exitPointerLock()
+      // neuer Drehpunkt: was in der Bildmitte liegt, sonst 40 Blöcke voraus
+      const hit = this.pick(new THREE.Vector2(0, 0), true)
+      const d = new THREE.Vector3()
+      this.camera.getWorldDirection(d)
+      const t = hit && hit.distance < 600 ? hit.point : this.camera.position.clone().addScaledVector(d, 40)
+      this.orbit.target.copy(t)
+      this.orbit.enabled = true
+      this.orbit.update()
+    }
+    this.lockChanged()
+    this.onMode(m)
+    this.needsRender = true
+  }
+
+  /** WASD im Umsehen-Modus: Drehpunkt und Kamera gemeinsam verschieben, schneller, je weiter weg. */
+  private walk(dt: number): boolean {
+    const k = this.fly.keys
+    if (!k.size) return false
+    const f = (k.has('KeyW') ? 1 : 0) - (k.has('KeyS') ? 1 : 0)
+    const s = (k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0)
+    const u = (k.has('Space') || k.has('KeyE') ? 1 : 0) - (k.has('ShiftLeft') || k.has('ShiftRight') || k.has('KeyQ') ? 1 : 0)
+    if (!f && !s && !u) return false
+    this.glide = null
+    const dist = this.camera.position.distanceTo(this.orbit.target)
+    const speed = Math.max(12, dist * 0.9) * (k.has('ControlLeft') || k.has('ControlRight') ? 2.2 : 1) * dt
+    const fwd = new THREE.Vector3().subVectors(this.orbit.target, this.camera.position).setY(0)
+    if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1)
+    fwd.normalize()
+    const right = new THREE.Vector3(-fwd.z, 0, fwd.x)
+    const move = fwd.multiplyScalar(f).add(right.multiplyScalar(s))
+    if (move.lengthSq()) move.normalize().multiplyScalar(speed)
+    move.y = u * speed * 0.6
+    this.camera.position.add(move)
+    this.orbit.target.add(move)
+    this.orbit.update()
+    this.onMove()
+    return true
+  }
+
+  private glide: { from: THREE.Vector3; to: THREE.Vector3; t: number } | null = null
+
+  /** Drehpunkt sanft an eine Stelle (Szenenkoordinaten) schieben, Kamera wandert mit. */
+  private glideTo(p: THREE.Vector3): void {
+    if (this.mode !== 'orbit') return
+    this.glide = { from: this.orbit.target.clone(), to: p.clone(), t: 0 }
+  }
+
+  private stepGlide(dt: number): void {
+    const g = this.glide!
+    g.t = Math.min(1, g.t + dt / 0.6)
+    const e = 1 - Math.pow(1 - g.t, 3)
+    const next = g.from.clone().lerp(g.to, e)
+    const delta = next.clone().sub(this.orbit.target)
+    this.orbit.target.add(delta)
+    this.camera.position.add(delta)
+    this.orbit.update()
+    this.needsRender = true
+    this.needsAim = true
+    this.onMove()
+    if (g.t >= 1) this.glide = null
+  }
+
+  /** Zu einer Weltstelle springen: Blick schräg von oben aus dist Blöcken Abstand. */
+  jumpTo(x: number, y: number, z: number, dist = 90): void {
+    if (this.mode === 'fly') this.setMode('orbit')
+    this.glide = null
+    const t = new THREE.Vector3(x - this.base[0], y - this.base[1], z - this.base[2])
+    // schräg von oben (etwa 35°), Himmelsrichtung wie bisher; ohne Richtung von Südosten
+    const dir = new THREE.Vector3().subVectors(this.camera.position, this.orbit.target).setY(0)
+    if (dir.lengthSq() < 1) dir.set(0.5, 0, 0.85)
+    dir.normalize().setY(0.7).normalize().multiplyScalar(dist)
+    this.orbit.target.copy(t)
+    this.camera.position.copy(t).add(dir)
+    this.orbit.update()
+    this.needsRender = true
+    this.needsAim = true
+    this.onMove()
+  }
+
+  /** Punkt, um den sich gerade alles dreht (Welt); im Flug die Kamera selbst. */
+  focusWorld(): Vec3 {
+    const p = this.mode === 'orbit' ? this.orbit.target : this.camera.position
+    return [p.x + this.base[0], p.y + this.base[1], p.z + this.base[2]]
+  }
+
+  /** Abstand der Kamera zum Geschehen (bestimmt, wie weit Blöcke geladen werden). */
+  viewDistance(): number {
+    return this.mode === 'orbit' ? this.camera.position.distanceTo(this.orbit.target) : 30
+  }
+
+  /** Blickrichtung (Bogenmaß, 0 = Norden, im Uhrzeigersinn) für die Minikarte. */
+  heading(): number {
+    const d = new THREE.Vector3()
+    this.camera.getWorldDirection(d)
+    return Math.atan2(d.x, -d.z)
+  }
+
+  private fogKey = ''
+
+  private updateFog(): void {
+    const d = this.mode === 'orbit' ? this.camera.position.distanceTo(this.orbit.target) : 40
+    const near = Math.max(220, d * 1.8)
+    const far = Math.min(8000, Math.max(900, d * 6))
+    const key = `${near | 0}|${far | 0}`
+    if (key === this.fogKey) return
+    this.fogKey = key
+    const fog = this.scene.fog as THREE.Fog | null
+    if (fog) {
+      fog.near = near
+      fog.far = far
+    }
+    this.lodMat.uniforms.fogNear.value = near
+    this.lodMat.uniforms.fogFar.value = far
+    this.needsRender = true
   }
 
   private makeMaterials(): void {
@@ -151,7 +334,9 @@ export class Scene3D {
     const sky = new THREE.Color(cs.getPropertyValue('--stage').trim() || '#ececf1')
     const accent = new THREE.Color(cs.getPropertyValue('--accent').trim() || '#7f5fe8')
     this.scene.background = sky
-    this.scene.fog = new THREE.Fog(sky, 160, 420)
+    this.scene.fog = new THREE.Fog(sky, 220, 900)
+    this.lodMat.uniforms.fogColor.value = sky
+    this.fogKey = ''
     this.mats.line.color = accent
     this.mats.current.color = new THREE.Color(1, 1, 1).lerp(accent, 0.42)
     this.needsRender = true
@@ -187,17 +372,20 @@ export class Scene3D {
 
   clear(base: Vec3): void {
     this.base = base
-    for (const m of this.pieces.values()) {
+    for (const m of [...this.pieces.values(), ...this.lods.values()]) {
       this.scene.remove(m)
       m.geometry.dispose()
     }
     this.pieces.clear()
+    this.lods.clear()
+    this.mask.center()
     for (const id of [...this.buildings.keys()]) this.removeBuilding(id)
     this.setGhost(null)
     this.needsRender = true
   }
 
-  setPiece(key: string, data: MeshData | null): void {
+  /** Geländestück (32 × 32) setzen; x0/z0 in Weltkoordinaten für die Maske der Ferne. */
+  setPiece(key: string, data: MeshData | null, x0?: number, z0?: number): void {
     const old = this.pieces.get(key)
     if (old) {
       this.scene.remove(old)
@@ -211,24 +399,48 @@ export class Scene3D {
       this.scene.add(m)
       this.pieces.set(key, m)
     }
+    if (x0 !== undefined && z0 !== undefined) this.mask.set(x0 - this.base[0] + 1, z0 - this.base[2] + 1, !!data)
     this.needsRender = true
   }
 
-  /** Kamera an den Rand des Bereichs stellen, Blick zur Mitte. */
-  overview(x0: number, z0: number, x1: number, z1: number, y: number): void {
-    const [bx, by, bz] = this.base
-    const cx = (x0 + x1) / 2 - bx, cz = (z0 + z1) / 2 - bz
-    const span = Math.max(x1 - x0, z1 - z0)
-    this.camera.position.set(cx, y - by + Math.max(24, span * 0.35), z1 - bz + Math.max(10, span * 0.15))
-    this.fly.lookAt(new THREE.Vector3(cx, y - by, cz))
+  /** Ferne einer Region setzen oder entfernen. */
+  setLod(key: string, data: LodMesh | null): void {
+    const old = this.lods.get(key)
+    if (old) {
+      this.scene.remove(old)
+      old.geometry.dispose()
+      this.lods.delete(key)
+    }
+    if (data && data.indices.length) {
+      const g = new THREE.BufferGeometry()
+      g.setAttribute('position', new THREE.BufferAttribute(data.positions, 3))
+      g.setAttribute('color', new THREE.BufferAttribute(data.colors, 3))
+      g.setAttribute('owner', new THREE.BufferAttribute(data.owner, 2))
+      g.setIndex(new THREE.BufferAttribute(data.indices, 1))
+      g.computeBoundingSphere()
+      const m = new THREE.Mesh(g, this.lodMat)
+      m.name = 'lod'
+      this.scene.add(m)
+      this.lods.set(key, m)
+    }
+    this.needsRender = true
+  }
+
+  lodKeys(): string[] {
+    return [...this.lods.keys()]
   }
 
   focusOn(min: Vec3, max: Vec3): void {
     const [bx, by, bz] = this.base
     const c = new THREE.Vector3((min[0] + max[0] + 1) / 2 - bx, (min[1] + max[1]) / 2 - by, (min[2] + max[2] + 1) / 2 - bz)
     const r = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2]) + 1
+    if (this.mode === 'fly') this.setMode('orbit')
+    this.glide = null
+    this.orbit.target.copy(c)
     this.camera.position.set(c.x + r * 0.9 + 4, c.y + r * 0.7 + 4, c.z + r * 1.1 + 6)
-    this.fly.lookAt(c)
+    this.orbit.update()
+    this.needsRender = true
+    this.onMove()
   }
 
   /** Weltposition der Kamera, wie F3 im Spiel. */
@@ -320,17 +532,24 @@ export class Scene3D {
 
   // ---------- Zielen ----------
 
+  /** Strahl von der Kamera: zuerst Gelände und Bauwerke, auf Wunsch auch die Ferne. */
+  private pick(ndc: THREE.Vector2, far = false): THREE.Intersection | null {
+    this.raycaster.setFromCamera(ndc, this.camera)
+    this.raycaster.far = far ? 9000 : 600
+    const targets: THREE.Object3D[] = [...this.pieces.values()]
+    for (const b of this.buildings.values()) b.group.traverse(o => { if (o.name === 'building' && o.parent?.visible) targets.push(o) })
+    const hit = this.raycaster.intersectObjects(targets, false)[0]
+    if (hit || !far) return hit ?? null
+    return this.raycaster.intersectObjects([...this.lods.values()], false)[0] ?? null
+  }
+
   private updateAim(): void {
-    const ndc = this.fly.locked ? new THREE.Vector2(0, 0) : this.mouse
+    const ndc = this.mode === 'fly' ? new THREE.Vector2(0, 0) : this.mouse
     if (!ndc) {
       this.setAim(null)
       return
     }
-    this.raycaster.setFromCamera(ndc, this.camera)
-    this.raycaster.far = 300
-    const targets: THREE.Object3D[] = [...this.pieces.values()]
-    for (const b of this.buildings.values()) b.group.traverse(o => { if (o.name === 'building' && o.parent?.visible) targets.push(o) })
-    const hit = this.raycaster.intersectObjects(targets, false)[0]
+    const hit = this.pick(ndc)
     if (!hit?.face) {
       this.setAim(null)
       return

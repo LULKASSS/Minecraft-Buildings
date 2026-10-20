@@ -1,5 +1,6 @@
-// Steuert die 3D-Ansicht eines Bereichs: Gelände stückweise aus den Workern holen und vermaschen,
-// Bauwerke einblenden, Vorschau am Fadenkreuz beim Platzieren, Schicht-Ansicht.
+// Die 3D-Welt: Gelände um den Kamerapunkt stückweise aus den Workern holen (nah in Blöcken, fern als Säulen
+// aus den Kartenkacheln), Bauwerke einblenden, Vorschau beim Platzieren, Schicht-Ansicht.
+// Kein Bereich mehr: was man ansieht, wird geladen, was weit weg ist, wieder freigegeben.
 
 import type { Vec3 } from '../blueprint/blueprint'
 import { isAir, parseState, type BlockState } from '../blueprint/blockstate'
@@ -8,17 +9,25 @@ import { transformBlueprint, type Rotation } from '../blueprint/transform'
 import { buildFromSource, entryOf } from '../catalog'
 import type { Blueprint, BlueprintSource } from '../blueprint/blueprint'
 import type { Ground } from '../style/builder'
+import { buildLod } from '../render/lod'
 import { meshFallback, type MeshData, type VoxelBlock } from '../render/mesher'
-import { Scene3D, type Aim, type BuildingMeshes } from '../render/scene'
+import { Scene3D, type Aim, type BuildingMeshes, type CamMode } from '../render/scene'
 import { isOpaqueCube } from '../render/shapes'
 import type { TexturedMesher } from '../render/textured'
 import { areaGet, type AreaResult } from '../world/area'
-import { addPlacement, choiceSource, newSeeds, openArea, placedOf, placementLabel, placementsIn, S, saveProject, selectedPlacement, toast, update, type Area } from './state'
+import { NO_SURFACE } from '../world/chunk'
+import { TILE, TRACE } from '../world/tile'
+import { addPlacement, choiceSource, newSeeds, placedOf, placementLabel, rememberCamera, S, saveProject, selectedPlacement, toast, update } from './state'
+import type { WorldSession } from './world-session'
 
 const PIECE = 32
 /** Böden, auf denen Gras und Blumen gesetzt werden können */
 const SOIL = /^minecraft:(grass_block|dirt|coarse_dirt|podzol|mycelium|rooted_dirt|moss_block|mud|muddy_mangrove_roots|farmland|pale_moss_block)/
-const PARALLEL = 4
+const PARALLEL = 3
+/** Ferne bis hierhin zeigen (Blöcke vom Kamerapunkt) */
+const LOD_RADIUS = 2600
+/** Weiter als das vom Mittelpunkt der Szene: alles neu um den Kamerapunkt aufbauen (Genauigkeit, Maske) */
+const REBASE = 1700
 
 interface Piece {
   key: string
@@ -27,99 +36,242 @@ interface Piece {
   x1: number
   z1: number
   data: AreaResult | null // mit 1 Block Rand ringsum
+  state: 'loading' | 'ready'
 }
 
 /** Gleiche durchsichtige Blöcke nebeneinander verdecken sich (Wasser im See, Glasflächen). */
 const SAME_HIDES = /^minecraft:(water|lava|glass|.*_stained_glass|ice|bubble_column)$/
 
-export class AreaView {
+export class WorldView {
   readonly scene: Scene3D
-  private areaId: string | null = null
-  private pieces: Piece[] = []
+  private session: WorldSession | null = null
+  private pieces = new Map<string, Piece>()
+  private lodBuilt = new Map<string, number>() // Region → Stand der Kachel beim Bauen
   private run = 0
-  private occupied = new Map<string, BlockState>() // Blöcke der Bauwerke im Bereich
+  private inFlight = 0
+  private occupied = new Map<string, BlockState>() // Blöcke der Bauwerke
   private buildingBounds = new Map<string, { key: string; b: Bounds }>()
   private ghostRot: Rotation = 0
-  loaded = 0
-  onProgress: (done: number, total: number) => void = () => {}
+  private tickTimer: number | undefined
+  private userMoved = false
+  private start: Vec3 = [0, 64, 0]
+  onProgress: (loading: number) => void = () => {}
   onAimText: (html: string) => void = () => {}
+  onCamera: () => void = () => {}
 
   constructor(host: HTMLElement) {
     this.scene = new Scene3D(host)
     this.scene.onAim = a => this.aimChanged(a)
-    this.scene.onMove = () => this.aimChanged(this.scene.aim)
+    this.scene.onMove = () => {
+      this.aimChanged(this.scene.aim)
+      this.schedule()
+      this.onCamera()
+    }
     this.scene.onClick = a => this.clicked(a)
+    this.scene.onMode = m => {
+      S.camMode = m
+      update()
+    }
+    // Nutzer hat selbst bewegt: nicht mehr automatisch zur Base springen
+    const c = host.querySelector('canvas')!
+    for (const ev of ['pointerdown', 'wheel', 'keydown']) c.addEventListener(ev, () => (this.userMoved = true), { passive: true })
+    window.addEventListener('keydown', e => { if (/^Key[WASD]$/.test(e.code)) this.userMoved = true })
+    setInterval(() => this.tick(), 400)
   }
 
   setTextures(t: TexturedMesher | null): void {
     this.scene.setTextures(t)
-    this.remeshAll()
+    for (const p of this.pieces.values()) if (p.data) this.meshPiece(p)
     for (const id of this.scene.buildingIds()) this.scene.removeBuilding(id)
     this.buildingBounds.clear()
     this.ghostMeshKey = null
     this.sync()
   }
 
-  get total(): number {
-    return this.pieces.length
-  }
-
-  /** Bereich öffnen (oder offen lassen, wenn er es schon ist). */
-  async open(area: Area): Promise<void> {
-    if (this.areaId === area.id) return this.sync()
-    this.areaId = area.id
-    const run = ++this.run
-    this.pieces = []
-    for (let z = area.z0; z <= area.z1; z += PIECE)
-      for (let x = area.x0; x <= area.x1; x += PIECE)
-        this.pieces.push({ key: `${x},${z}`, x0: x, z0: z, x1: Math.min(area.x1, x + PIECE - 1), z1: Math.min(area.z1, z + PIECE - 1), data: null })
-    const midY = S.session?.surfaceAt(Math.round((area.x0 + area.x1) / 2), Math.round((area.z0 + area.z1) / 2)) ?? 64
-    this.scene.clear([area.x0, 0, area.z0])
-    this.buildingBounds.clear()
-    this.occupied.clear()
-    this.scene.overview(area.x0, area.z0, area.x1, area.z1, midY)
-    this.loaded = 0
-    this.onProgress(0, this.pieces.length)
+  /** Welt öffnen: Kamera an die gemerkte Stelle, sonst über den Spawn. */
+  open(session: WorldSession): void {
+    this.session = session
+    const cam = S.project.camera
+    const sp = session.info.spawn
+    const y = (x: number, z: number) => session.surfaceAt(x, z) ?? 70
+    this.start = cam ? [cam.x, cam.y, cam.z] : sp ? [sp[0], y(sp[0], sp[2]), sp[2]] : [0, 70, 0]
+    this.userMoved = !!cam
+    this.rebase(this.start[0], this.start[2])
+    this.scene.jumpTo(this.start[0], this.start[1], this.start[2], cam?.dist ?? 140)
     this.sync()
-
-    // Mitte zuerst, dann nach außen
-    const cx = (area.x0 + area.x1) / 2, cz = (area.z0 + area.z1) / 2
-    const queue = [...this.pieces].sort((a, b) => dist(a, cx, cz) - dist(b, cx, cz))
-    const worker = async () => {
-      for (;;) {
-        const p = queue.shift()
-        if (!p || run !== this.run || !S.session) return
-        try {
-          p.data = await S.session.area({ x0: p.x0 - 1, z0: p.z0 - 1, x1: p.x1 + 1, z1: p.z1 + 1, y0: NaN, y1: NaN })
-        } catch (e) {
-          if (run === this.run) toast(`Gelände ${p.key}: ${(e as Error).message}`, true)
-        }
-        if (run !== this.run) return
-        this.meshPiece(p)
-        this.loaded++
-        this.onProgress(this.loaded, this.pieces.length)
-        await new Promise(r => setTimeout(r, 0)) // Oberfläche atmen lassen
-      }
-    }
-    await Promise.all(Array.from({ length: PARALLEL }, worker))
-  }
-
-  /** Kamera zurück über den Bereich. */
-  overview(): void {
-    const area = openArea()
-    if (!area) return
-    const y = S.session?.surfaceAt(Math.round((area.x0 + area.x1) / 2), Math.round((area.z0 + area.z1) / 2)) ?? 64
-    this.scene.overview(area.x0, area.z0, area.x1, area.z1, y)
+    this.tick()
   }
 
   close(): void {
     this.run++
-    this.areaId = null
+    this.session = null
+    this.pieces.clear()
+    this.lodBuilt.clear()
+    this.scene.clear([0, 0, 0])
+  }
+
+  /** Zur Stelle springen, an der die Welt geöffnet wurde. */
+  home(): void {
+    this.scene.jumpTo(this.start[0], this.start[1], this.start[2], 140)
+  }
+
+  /** Irgendwohin springen (Minikarte, Orte mit viel Spielzeit). */
+  jumpTo(x: number, z: number, dist = 120): void {
+    this.userMoved = true
+    const y = this.session?.surfaceAt(x, z) ?? this.terrainTop(x, z) ?? this.scene.focusWorld()[1]
+    this.scene.jumpTo(x, y, z, dist)
+  }
+
+  /** Einmal automatisch zur Base, sobald die Spuren sie gefunden haben – nur, wenn man selbst noch nicht unterwegs war. */
+  maybeGoHome(x: number, z: number): boolean {
+    if (this.userMoved || !this.session) return false
+    this.userMoved = true
+    this.jumpTo(x, z, 140)
+    return true
+  }
+
+  setMode(m: CamMode): void {
+    this.scene.setMode(m)
+  }
+
+  private terrainTop(x: number, z: number): number | null {
+    const p = this.pieces.get(pieceKey(x, z))
+    if (!p?.data) return null
+    for (let y = p.data.box.y1; y >= p.data.box.y0; y--) {
+      const t = areaGet(p.data, x, y, z)
+      if (t && !isAir(t)) return y
+    }
+    return null
+  }
+
+  private rebase(x: number, z: number): void {
+    this.run++
+    this.inFlight = 0
+    this.pieces.clear()
+    this.lodBuilt.clear()
+    const by = Math.round(this.start[1])
+    this.scene.clear([Math.round(x / PIECE) * PIECE, by, Math.round(z / PIECE) * PIECE])
+    this.buildingBounds.clear()
+    this.ghostMeshKey = null
+  }
+
+  private schedule(): void {
+    if (this.tickTimer) return
+    this.tickTimer = window.setTimeout(() => {
+      this.tickTimer = undefined
+      this.tick()
+    }, 120)
+  }
+
+  /** Laden und Freigeben nach dem, was die Kamera gerade sieht. */
+  private tick(): void {
+    const s = this.session
+    if (!s || !this.scene.host.offsetParent) return
+    const [fx, fy, fz] = this.scene.focusWorld()
+    const [bx, , bz] = this.scene.base
+    if (Math.hypot(fx - bx, fz - bz) > REBASE) {
+      this.start = [fx, fy, fz]
+      this.rebase(fx, fz)
+      this.sync()
+    }
+    const dist = this.scene.viewDistance()
+    const radius = Math.max(96, Math.min(288, dist * 1.4))
+    const keep = radius + 96
+
+    // Kacheln für die Ferne in der Nähe zuerst
+    const rr = Math.ceil(LOD_RADIUS / TILE)
+    s.setView(fx, fz, Math.floor(fx / TILE) - rr, Math.floor(fz / TILE) - rr, Math.floor(fx / TILE) + rr, Math.floor(fz / TILE) + rr)
+
+    // nahe Stücke laden
+    const want: { x: number; z: number; d: number }[] = []
+    const r = Math.ceil(radius / PIECE)
+    const cx = Math.floor(fx / PIECE), cz = Math.floor(fz / PIECE)
+    for (let j = -r; j <= r; j++)
+      for (let i = -r; i <= r; i++) {
+        const x = (cx + i) * PIECE, z = (cz + j) * PIECE
+        const d = Math.hypot(x + PIECE / 2 - fx, z + PIECE / 2 - fz)
+        if (d > radius || this.pieces.has(`${x},${z}`)) continue
+        if (!s.hasRegion(Math.floor(x / TILE), Math.floor(z / TILE))) continue
+        want.push({ x, z, d })
+      }
+    want.sort((a, b) => a.d - b.d)
+    for (const w of want) {
+      if (this.inFlight >= PARALLEL) break
+      void this.loadPiece(w.x, w.z)
+    }
+
+    // ferne Stücke freigeben
+    for (const p of [...this.pieces.values()]) {
+      if (p.state !== 'ready') continue
+      if (Math.hypot(p.x0 + PIECE / 2 - fx, p.z0 + PIECE / 2 - fz) <= keep) continue
+      this.pieces.delete(p.key)
+      this.scene.setPiece(p.key, null, p.x0, p.z0)
+    }
+
+    this.updateLods(fx, fz)
+    this.onProgress(this.inFlight + want.length)
+    if (this.scene.mode === 'orbit') rememberCamera({ x: fx, y: fy, z: fz, dist })
+  }
+
+  private async loadPiece(x0: number, z0: number): Promise<void> {
+    const s = this.session!
+    const run = this.run
+    const p: Piece = { key: `${x0},${z0}`, x0, z0, x1: x0 + PIECE - 1, z1: z0 + PIECE - 1, data: null, state: 'loading' }
+    this.pieces.set(p.key, p)
+    this.inFlight++
+    try {
+      p.data = await s.area({ x0: p.x0 - 1, z0: p.z0 - 1, x1: p.x1 + 1, z1: p.z1 + 1, y0: NaN, y1: NaN })
+    } catch (e) {
+      if (run === this.run) toast(`Gelände ${p.key}: ${(e as Error).message}`, true)
+    }
+    if (run !== this.run) return
+    this.inFlight--
+    p.state = 'ready'
+    if (this.pieces.get(p.key) !== p) return
+    this.meshPiece(p)
+    // Bauwerke, deren Fundament hier liegt, ans Gelände anpassen
+    if (S.project.placements.some(pl => near(pl.pos, p))) this.sync()
+    this.schedule()
+  }
+
+  /** Ferne aus den Kartenkacheln: Regionen im Umkreis bauen, weit entfernte entfernen. */
+  private updateLods(fx: number, fz: number): void {
+    const s = this.session!
+    let built = 0
+    for (const t of s.tiles.values()) {
+      const key = `${t.rx},${t.rz}`
+      const d = Math.hypot(Math.max(0, Math.abs((t.rx + 0.5) * TILE - fx) - TILE / 2), Math.max(0, Math.abs((t.rz + 0.5) * TILE - fz) - TILE / 2))
+      if (d > LOD_RADIUS + 400) {
+        if (this.lodBuilt.has(key)) {
+          this.scene.setLod(key, null)
+          this.lodBuilt.delete(key)
+        }
+        continue
+      }
+      if (d > LOD_RADIUS || !t.lodH || !t.lodC || this.lodBuilt.has(key) || built >= 2) continue
+      const tiles = s.tiles
+      const neighbor = (cx: number, cz: number) => {
+        const n = tiles.get(`${Math.floor(cx / TRACE)},${Math.floor(cz / TRACE)}`)
+        if (!n?.lodH) return null
+        const h = n.lodH[(((cx % TRACE) + TRACE) % TRACE) + (((cz % TRACE) + TRACE) % TRACE) * TRACE]
+        return h === NO_SURFACE ? null : h
+      }
+      this.scene.setLod(key, buildLod(t.lodH, t.lodC, t.rx, t.rz, this.scene.base, neighbor))
+      this.lodBuilt.set(key, 1)
+      built++
+    }
+  }
+
+  /** Neue Kartenfarben (.jar) oder neue Kachel: Ferne dieser Region neu bauen. */
+  tileChanged(rx: number, rz: number): void {
+    // die alte Ferne bleibt stehen, bis die neue gebaut ist (setLod ersetzt)
+    this.lodBuilt.delete(`${rx},${rz}`)
+    this.schedule()
   }
 
   private meshPiece(p: Piece): void {
     const a = p.data
-    if (!a) return this.scene.setPiece(p.key, null)
+    if (!a) return this.scene.setPiece(p.key, null, p.x0, p.z0)
     const [bx, by, bz] = this.scene.base
     const { box, palette } = a
     const opaque = palette.map(s => isOpaqueCube(s))
@@ -144,7 +296,7 @@ export class AreaView {
       if (opaque[v]) return true
       return palette[v] === self && SAME_HIDES.test(names[v])
     }
-    this.scene.setPiece(p.key, this.mesh(blocks, occ, false))
+    this.scene.setPiece(p.key, this.mesh(blocks, occ, false), p.x0, p.z0)
   }
 
   private mesh(blocks: VoxelBlock[], occ: (x: number, y: number, z: number, self: BlockState) => boolean, keepTop: boolean): MeshData {
@@ -152,25 +304,18 @@ export class AreaView {
     return t ? t.mesh(blocks, occ, keepTop) : meshFallback(blocks, { occludes: occ, keepTop })
   }
 
-  private remeshAll(): void {
-    for (const p of this.pieces) if (p.data) this.meshPiece(p)
-  }
-
   /** Gelände-Block an Weltposition, sofern geladen. */
   terrainAt(x: number, y: number, z: number): BlockState | null {
-    for (const p of this.pieces) {
-      if (p.data && x >= p.x0 && x <= p.x1 && z >= p.z0 && z <= p.z1) return areaGet(p.data, x, y, z)
-    }
-    return null
+    const p = this.pieces.get(pieceKey(x, z))
+    return p?.data ? areaGet(p.data, x, y, z) : null
   }
 
   // ---------- Bauwerke ----------
 
-  /** Bauwerke des Bereichs mit dem Zustand abgleichen. */
+  /** Bauwerke mit dem Zustand abgleichen. */
   sync(): void {
-    const area = openArea()
-    if (!area || area.id !== this.areaId) return
-    const list = placementsIn(area.id)
+    if (!this.session) return
+    const list = S.project.placements
     this.refreshGround(list)
     const changed: Bounds[] = []
     const seen = new Set<string>()
@@ -197,12 +342,12 @@ export class AreaView {
       this.occupied.clear()
       for (const pl of list) for (const l of placedOf(pl).layers) for (const b of l.blocks) this.occupied.set(`${b.x},${b.y},${b.z}`, b.state)
       // Geländestücke unter geänderten Bauwerken neu vermaschen (Gelände dort ausblenden bzw. wieder zeigen)
-      for (const p of this.pieces) {
+      for (const p of this.pieces.values()) {
         if (changed.some(b => b.min[0] <= p.x1 + 1 && b.max[0] >= p.x0 - 1 && b.min[2] <= p.z1 + 1 && b.max[2] >= p.z0 - 1)) this.meshPiece(p)
       }
     }
     const sel = selectedPlacement()
-    this.scene.setGuide(sel && sel.areaId === area.id ? sel.id : null, S.guide.layer, S.guide.single)
+    this.scene.setGuide(sel ? sel.id : null, S.guide.layer, S.guide.single)
     this.syncGhost()
   }
 
@@ -281,9 +426,10 @@ export class AreaView {
 
   /** Bei verschobenen oder gedrehten Bauwerken das Fundament neu ans Gelände anpassen. */
   private refreshGround(list: Placement[]): void {
-    if (this.loaded < this.pieces.length) return
     for (const pl of list) {
       if (!entryOf(pl.source.generator).ground) continue
+      // erst anpassen, wenn das Gelände dort geladen ist, sonst würde es flach
+      if (this.pieces.get(pieceKey(pl.pos[0], pl.pos[2]))?.state !== 'ready') continue
       const g = this.groundFor(pl.source, pl.pos, pl.rotation, pl.mirror)
       if (JSON.stringify(g) !== JSON.stringify(pl.source.params.ground)) {
         pl.source.params = { ...pl.source.params, ground: g }
@@ -310,12 +456,13 @@ export class AreaView {
     return n
   }
 
-  /** Blöcke im Bereich zählen (ohne geplante Bauwerke) – Grundlage fürs Paletten-Lernen. */
-  blockCounts(): Map<BlockState, number> {
+  /** Blöcke rund um den Kamerapunkt zählen (ohne geplante Bauwerke) – Grundlage fürs Paletten-Lernen. */
+  blockCounts(radius = 48): Map<BlockState, number> {
     const m = new Map<BlockState, number>()
-    for (const p of this.pieces) {
+    const [fx, , fz] = this.scene.focusWorld()
+    for (const p of this.pieces.values()) {
       const a = p.data
-      if (!a) continue
+      if (!a || Math.hypot(p.x0 + PIECE / 2 - fx, p.z0 + PIECE / 2 - fz) > radius) continue
       const counts = new Uint32Array(a.palette.length)
       const { box } = a
       const w = box.x1 - box.x0 + 1, d = box.z1 - box.z0 + 1
@@ -392,20 +539,15 @@ export class AreaView {
   }
 
   private clicked(a: (Aim & { face: Vec3 }) | null): void {
-    const area = openArea()
-    if (!area) return
+    if (!this.session) return
     if (S.placing) {
       if (!a) return
       const pos = this.targetOf(a)
-      if (pos[0] < area.x0 || pos[0] > area.x1 || pos[2] < area.z0 || pos[2] > area.z1) {
-        toast('Das liegt außerhalb des Bereichs.')
-        return
-      }
       const src = choiceSource()
       const ground = this.groundFor(src, pos, this.ghostRot, false)
       const label = placementLabel()
       S.placing = null
-      addPlacement(area.id, { ...src, params: { ...src.params, ground } }, label, pos, this.ghostRot)
+      addPlacement({ ...src, params: { ...src.params, ground } }, label, pos, this.ghostRot)
       S.build.seeds = newSeeds()
       return
     }
@@ -413,15 +555,20 @@ export class AreaView {
       S.sel = { kind: 'placement', id: a.placementId }
       S.guide.layer = null
       update()
-    } else if (S.sel?.kind === 'placement') {
-      S.sel = { kind: 'area', id: area.id }
+    } else if (S.sel) {
+      S.sel = null
       update()
     }
   }
 }
 
-function dist(p: { x0: number; z0: number; x1: number; z1: number }, x: number, z: number): number {
-  return Math.hypot((p.x0 + p.x1) / 2 - x, (p.z0 + p.z1) / 2 - z)
+function pieceKey(x: number, z: number): string {
+  return `${Math.floor(x / PIECE) * PIECE},${Math.floor(z / PIECE) * PIECE}`
+}
+
+/** Liegt ein Bauwerk (Anker) in oder neben diesem Stück? */
+function near(pos: Vec3, p: { x0: number; z0: number; x1: number; z1: number }): boolean {
+  return pos[0] >= p.x0 - 48 && pos[0] <= p.x1 + 48 && pos[2] >= p.z0 - 48 && pos[2] <= p.z1 + 48
 }
 
 function label(state: BlockState): string {
