@@ -17,7 +17,7 @@ export interface SideActions {
   uploadFolder(): void
   demo(): void
   closeWorld(): void
-  loadTextures(): void
+  loadTextures(file?: File): void
   exportLitematic(): void
   exportSchem(): void
   open3d(): void
@@ -40,6 +40,11 @@ export function renderSide(el: HTMLElement, a: SideActions): void {
     </div>`
   el.querySelector('.side-scroll')!.scrollTop = scroll
   bind(el, a)
+}
+
+/** Versionsordner, in dem die passende .jar liegt (aus level.dat, z. B. 26.1). */
+function versionGuess(): string {
+  return S.session?.info.versionName || '<Version>'
 }
 
 function isDark(): boolean {
@@ -75,6 +80,7 @@ function worldBlock(): string {
         <span class="small muted grow">${S.textures === 'ready' ? 'Texturen aus deiner .jar' : S.textures === 'loading' ? 'Texturen werden gelesen …' : 'Einfarbig'}</span>
         ${S.textures !== 'ready' ? `<button class="btn small" data-act="textures" ${S.textures === 'loading' ? 'disabled' : ''}>.jar wählen</button>` : ''}
       </div>
+      ${S.textures === 'none' ? `<p class="note muted" style="margin:6px 0 0">Texturen aus <b>minecraft/versions/${esc(versionGuess())}/${esc(versionGuess())}.jar</b>, oder die Datei auf die Karte ziehen.</p>` : ''}
     </div>`
 }
 

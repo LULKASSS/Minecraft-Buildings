@@ -180,8 +180,8 @@ const actions: SideActions = {
     area = null
     update()
   },
-  async loadTextures() {
-    const [f] = await pickFile('.jar,.zip')
+  async loadTextures(file?: File) {
+    const f = file ?? (await pickFile('.jar,.zip'))[0]
     if (!f) return
     S.textures = 'loading'
     update()
@@ -379,6 +379,8 @@ stage.addEventListener('drop', async e => {
   const dt = e.dataTransfer
   if (!dt) return
   try {
+    const jar = [...dt.files].find(f => /\.jar$/i.test(f.name))
+    if (jar && dt.files.length === 1) return void (S.session ? actions.loadTextures(jar) : toast('Erst die Welt laden, dann die .jar.'))
     const zip = [...dt.files].find(f => /\.zip$/i.test(f.name))
     if (zip && dt.files.length === 1) return await openSession(await ZipSource.open(zip))
     S.busy = 'Ordner wird gelesen …'

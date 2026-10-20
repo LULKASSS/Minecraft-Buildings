@@ -39,7 +39,7 @@ export async function loadTextures(file: File): Promise<LoadedTextures> {
 
   if (defs.length < 100 && !base) {
     await reader.close()
-    throw new Error('In dieser Datei stecken keine Blockmodelle. Bitte zuerst die Minecraft-.jar wählen (versions/<Version>/<Version>.jar), ein Ressourcenpaket danach.')
+    throw new Error('In dieser Datei stecken keine Blockmodelle. Bitte die normale Minecraft-.jar wählen: versions/<Version>/<Version>.jar, nicht die aus dem fabric-loader-Ordner. Ein Ressourcenpaket danach.')
   }
   const next: Base = base && defs.length < 100
     ? { definitions: new Map(base.definitions), models: new Map(base.models), textures: new Map(base.textures) }

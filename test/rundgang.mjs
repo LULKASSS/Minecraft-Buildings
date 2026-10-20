@@ -98,6 +98,12 @@ async function eingebettet() {
   const name = await frame.locator('.world-name').textContent()
   if (name !== 'Testwelt') fail(`eingebettet: Welt heißt "${name}"`)
   await page.waitForTimeout(1200)
+  if (process.env.JAR) {
+    const [jc] = await Promise.all([page.waitForEvent('filechooser'), frame.locator('[data-act="textures"]').click()])
+    await jc.setFiles(process.env.JAR)
+    await frame.getByText('Texturen aus deiner .jar').waitFor({ timeout: 60000 })
+    await page.waitForTimeout(1500)
+  }
   const box = await frame.locator('#map canvas').boundingBox()
   await page.mouse.click(box.x + box.width / 2 + 24, box.y + box.height / 2 + 10)
   await frame.locator('[data-act="place"]').click()
