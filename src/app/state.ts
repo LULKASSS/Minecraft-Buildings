@@ -1,4 +1,5 @@
 // Ein Zustand S für die ganze App. Änderungen über update(), danach zeichnen sich die Bereiche neu.
+// Ablauf: Bereich auf der Karte aufziehen → Bereich in 3D laden und durchfliegen → dort Bauwerke platzieren.
 
 import type { Vec3 } from '../blueprint/blueprint'
 import { boundsOf, layersOf, overlaps, place, type Bounds, type Layer, type Placed, type Placement } from '../blueprint/placement'
@@ -7,24 +8,28 @@ import { buildFromSource } from '../catalog'
 import type { WorldSession } from './world-session'
 import * as store from './store'
 
-export interface Marker {
+/** Rechteckiger Bereich der Welt, Ecken einschließlich. */
+export interface Area {
   id: string
   name: string
-  kind: 'point' | 'line' | 'area'
-  points: [number, number][]
-  y: number
+  x0: number
+  z0: number
+  x1: number
+  z1: number
 }
+
+export const MAX_AREA = 512
 
 export interface Project {
   worldKey: string
   worldName: string
   dataVersion: number
-  markers: Marker[]
+  areas: Area[]
   placements: Placement[]
   updatedAt: number
 }
 
-export type Selection = { kind: 'marker' | 'placement'; id: string } | null
+export type Selection = { kind: 'area' | 'placement'; id: string } | null
 
 export interface State {
   theme: 'system' | 'light' | 'dark'
@@ -33,6 +38,10 @@ export interface State {
   busy: string | null
   project: Project
   sel: Selection
+  /** Bereich, der gerade in 3D offen ist */
+  openArea: string | null
+  /** Bauwerk-Typ, der gerade in 3D an den Mauszeiger gehängt ist */
+  placing: string | null
   guide: { layer: number | null; single: boolean; playing: boolean; tab: 'layer' | 'all' }
   savedFolder: string | null
   textures: 'none' | 'loading' | 'ready'
@@ -41,7 +50,7 @@ export interface State {
 export const DEMO_DATA_VERSION = 4786 // 26.1
 
 function emptyProject(worldKey = '', worldName = '', dataVersion = DEMO_DATA_VERSION): Project {
-  return { worldKey, worldName, dataVersion, markers: [], placements: [], updatedAt: Date.now() }
+  return { worldKey, worldName, dataVersion, areas: [], placements: [], updatedAt: Date.now() }
 }
 
 export const S: State = {
@@ -51,6 +60,8 @@ export const S: State = {
   busy: null,
   project: emptyProject(),
   sel: null,
+  openArea: null,
+  placing: null,
   guide: { layer: null, single: false, playing: false, tab: 'layer' },
   savedFolder: null,
   textures: 'none',
@@ -87,9 +98,13 @@ export function saveProject(): void {
 }
 
 export async function loadProject(worldKey: string, worldName: string, dataVersion: number): Promise<void> {
-  const p = await store.get<Project>('kv', `project:${worldKey}`)
-  S.project = p ? { ...p, worldName, dataVersion } : emptyProject(worldKey, worldName, dataVersion)
+  const p = await store.get<Project & { markers?: unknown }>('kv', `project:${worldKey}`)
+  S.project = p ? { ...p, areas: p.areas ?? [], worldName, dataVersion } : emptyProject(worldKey, worldName, dataVersion)
+  // Bauwerke aus Fassung 1/2 hingen an Punkten statt an Bereichen: ohne Bereich nicht mehr erreichbar
+  S.project.placements = S.project.placements.filter(pl => pl.areaId && S.project.areas.some(a => a.id === pl.areaId))
   S.sel = null
+  S.openArea = null
+  S.placing = null
   placedCache.clear()
 }
 
@@ -133,9 +148,17 @@ export function selectedPlacement(): Placement | null {
   return S.project.placements.find(p => p.id === S.sel!.id) ?? null
 }
 
-export function selectedMarker(): Marker | null {
-  if (S.sel?.kind !== 'marker') return null
-  return S.project.markers.find(m => m.id === S.sel!.id) ?? null
+export function selectedArea(): Area | null {
+  if (S.sel?.kind !== 'area') return null
+  return S.project.areas.find(a => a.id === S.sel!.id) ?? null
+}
+
+export function openArea(): Area | null {
+  return S.project.areas.find(a => a.id === S.openArea) ?? null
+}
+
+export function placementsIn(areaId: string): Placement[] {
+  return S.project.placements.filter(p => p.areaId === areaId)
 }
 
 // ---------- Aktionen ----------
@@ -144,54 +167,55 @@ export function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
 }
 
-export function addMarker(x: number, z: number, y: number): Marker {
-  const n = S.project.markers.length + 1
-  const m: Marker = { id: uid('m'), name: `Punkt ${n}`, kind: 'point', points: [[x, z]], y }
-  S.project.markers.push(m)
-  S.sel = { kind: 'marker', id: m.id }
-  saveProject()
-  update()
-  return m
+/** Rechteck aus zwei Ecken, auf höchstens MAX_AREA × MAX_AREA begrenzt. */
+export function normalizeRect(ax: number, az: number, bx: number, bz: number): { x0: number; z0: number; x1: number; z1: number; clipped: boolean } {
+  let x0 = Math.min(ax, bx), x1 = Math.max(ax, bx), z0 = Math.min(az, bz), z1 = Math.max(az, bz)
+  let clipped = false
+  if (x1 - x0 + 1 > MAX_AREA) { x1 = x0 + MAX_AREA - 1; clipped = true }
+  if (z1 - z0 + 1 > MAX_AREA) { z1 = z0 + MAX_AREA - 1; clipped = true }
+  return { x0, z0, x1, z1, clipped }
 }
 
-export function moveMarker(id: string, x: number, z: number, y: number): void {
-  const m = S.project.markers.find(m => m.id === id)
-  if (!m) return
-  m.points = [[x, z]]
-  m.y = y
-  // Bauwerke an dieser Markierung wandern mit
-  for (const p of S.project.placements) if (p.markerId === id) p.pos = [x, y, z]
+export function addArea(r: { x0: number; z0: number; x1: number; z1: number }): Area {
+  const n = S.project.areas.length + 1
+  const a: Area = { id: uid('a'), name: `Bereich ${n}`, x0: r.x0, z0: r.z0, x1: r.x1, z1: r.z1 }
+  S.project.areas.push(a)
+  S.sel = { kind: 'area', id: a.id }
   saveProject()
   update()
+  return a
 }
 
-export function renameMarker(id: string, name: string): void {
-  const m = S.project.markers.find(m => m.id === id)
-  if (!m) return
-  m.name = name.trim() || m.name
-  for (const p of S.project.placements) if (p.markerId === id) p.name = m.name
+export function renameArea(id: string, name: string): void {
+  const a = S.project.areas.find(a => a.id === id)
+  if (!a) return
+  a.name = name.trim() || a.name
   saveProject()
   update()
 }
 
-export function deleteMarker(id: string): void {
-  S.project.markers = S.project.markers.filter(m => m.id !== id)
-  for (const p of S.project.placements) if (p.markerId === id) delete p.markerId
+export function deleteArea(id: string): void {
+  S.project.areas = S.project.areas.filter(a => a.id !== id)
+  for (const p of placementsIn(id)) placedCache.delete(p.id)
+  S.project.placements = S.project.placements.filter(p => p.areaId !== id)
   if (S.sel?.id === id) S.sel = null
+  if (S.openArea === id) {
+    S.openArea = null
+    S.view = 'map'
+  }
   saveProject()
   update()
 }
 
-export function placeAtMarker(markerId: string, generator: string): Placement {
-  const m = S.project.markers.find(m => m.id === markerId)!
-  const [x, z] = m.points[0]
+export function addPlacement(areaId: string, generator: string, pos: Vec3, rotation: Rotation): Placement {
+  const n = placementsIn(areaId).length + 1
   const p: Placement = {
     id: uid('p'),
-    name: m.name,
-    markerId,
+    name: n === 1 ? 'Bauwerk' : `Bauwerk ${n}`,
+    areaId,
     source: { generator, version: 1, seed: 0, params: {} },
-    pos: [x, m.y, z],
-    rotation: 0,
+    pos,
+    rotation,
     mirror: false,
   }
   S.project.placements.push(p)
@@ -219,14 +243,20 @@ export function rotatePlacement(id: string, dir: 1 | -1): void {
 export function nudgePlacement(id: string, d: Vec3): void {
   changePlacement(id, p => {
     p.pos = [p.pos[0] + d[0], p.pos[1] + d[1], p.pos[2] + d[2]]
-    if (d[0] || d[2]) delete p.markerId // vom Punkt gelöst, sobald seitlich verschoben
+  })
+}
+
+export function renamePlacement(id: string, name: string): void {
+  changePlacement(id, p => {
+    p.name = name.trim() || p.name
   })
 }
 
 export function deletePlacement(id: string): void {
+  const p = S.project.placements.find(p => p.id === id)
   S.project.placements = S.project.placements.filter(p => p.id !== id)
   placedCache.delete(id)
-  if (S.sel?.id === id) S.sel = null
+  if (S.sel?.id === id) S.sel = p?.areaId ? { kind: 'area', id: p.areaId } : null
   saveProject()
   update()
 }

@@ -1,10 +1,10 @@
-// Linke Spalte: Welt, Markierungen, Bauwerk (Typ, Drehen, Verschieben, Export).
+// Linke Spalte: Welt, Bereiche, und in der 3D-Ansicht: bauen (Typ, Drehen, Verschieben, Export).
 
 import { boundsOf } from '../blueprint/placement'
 import { CATALOG } from '../catalog'
 import {
-  collisions, deleteMarker, deletePlacement, nudgePlacement, placeAtMarker, placedOf, renameMarker,
-  rotatePlacement, changePlacement, S, selectedMarker, selectedPlacement, update,
+  changePlacement, collisions, deleteArea, deletePlacement, nudgePlacement, openArea, placedOf, placementsIn,
+  renameArea, renamePlacement, rotatePlacement, S, selectedArea, selectedPlacement, update, type Area,
 } from '../app/state'
 import { coord, esc, num } from '../ui/format'
 import { I } from './icons'
@@ -20,19 +20,24 @@ export interface SideActions {
   loadTextures(file?: File): void
   exportLitematic(): void
   exportSchem(): void
-  open3d(): void
+  openArea(id: string): void
+  drawArea(): void
+  startPlacing(type: string): void
+  cancelPlacing(): void
   toggleTheme(): void
-  focusMarker(id: string): void
+  focusArea(id: string): void
+  focusPlacement(id: string): void
 }
 
 export function renderSide(el: HTMLElement, a: SideActions): void {
   // Während getippt wird, nicht neu zeichnen (sonst springt der Cursor)
   if (el.contains(document.activeElement) && document.activeElement?.tagName === 'INPUT') return
   const scroll = el.querySelector('.side-scroll')?.scrollTop ?? 0
+  const body = !S.session ? '' : S.view === '3d' && openArea() ? buildBlocks(openArea()!) : areaBlocks()
   el.innerHTML = `
     <div class="side-scroll">
       ${worldBlock()}
-      ${S.session ? markersBlock() + buildBlock() : ''}
+      ${body}
     </div>
     <div class="side-foot">
       <span class="small muted">Etappe 1 · Durchstich</span>
@@ -84,61 +89,73 @@ function worldBlock(): string {
     </div>`
 }
 
-function markersBlock(): string {
-  const sel = selectedMarker()
-  const items = S.project.markers.map(m => {
-    const [x, z] = m.points[0]
-    const cur = S.sel?.kind === 'marker' && S.sel.id === m.id
-    return `<button class="item" data-marker="${m.id}" aria-current="${cur}">
-      <span class="pin"></span><span class="grow"><span class="item-name" style="display:block">${esc(m.name)}</span>
-      <span class="item-sub">${coord(x)} · ${coord(m.y)} · ${coord(z)}</span></span></button>`
+function size(a: Area): string {
+  return `${a.x1 - a.x0 + 1} × ${a.z1 - a.z0 + 1}`
+}
+
+/** Karte: Bereiche aufziehen, auswählen, in 3D öffnen. */
+function areaBlocks(): string {
+  const sel = selectedArea()
+  const items = S.project.areas.map(ar => {
+    const cur = S.sel?.kind === 'area' && S.sel.id === ar.id
+    const n = placementsIn(ar.id).length
+    return `<button class="item" data-area="${ar.id}" aria-current="${cur}">
+      <span class="sq outline"></span><span class="grow"><span class="item-name" style="display:block">${esc(ar.name)}</span>
+      <span class="item-sub">${size(ar)} · ${n === 0 ? 'noch leer' : n === 1 ? '1 Bauwerk' : `${n} Bauwerke`}</span></span></button>`
   }).join('')
   return `
     <div class="block">
-      <div class="block-head"><span class="block-title">Markierungen</span><span class="block-meta">${S.project.markers.length || ''}</span></div>
-      ${items ? `<div class="list">${items}</div>` : `<p class="note muted" style="margin:0">Klick auf die Karte setzt einen Punkt.</p>`}
+      <div class="block-head"><span class="block-title">Bereiche</span><span class="block-meta">${S.project.areas.length || ''}</span></div>
+      ${items ? `<div class="list">${items}</div>` : ''}
+      <button class="btn ${items ? '' : 'primary'}" style="width:100%;margin-top:${items ? 10 : 0}px" data-act="draw">${I.rect}Bereich aufziehen</button>
       ${sel ? `
-        <div class="stack" style="margin-top:12px">
-          <input class="field" data-rename="${sel.id}" value="${esc(sel.name)}" aria-label="Name" />
-          <div class="row"><span class="grow"></span><button class="btn small danger" data-act="del-marker">${I.trash}Löschen</button></div>
+        <div class="stack" style="margin-top:14px">
+          <input class="field" id="area-name" data-rename-area="${sel.id}" value="${esc(sel.name)}" aria-label="Name des Bereichs" />
+          <div class="small muted">X ${coord(sel.x0)} bis ${coord(sel.x1)} · Z ${coord(sel.z0)} bis ${coord(sel.z1)}</div>
+          <button class="btn accent" data-act="open-area">${I.cube}In 3D öffnen</button>
+          <div class="row"><span class="grow"></span><button class="btn small danger" data-act="del-area">${I.trash}Bereich löschen</button></div>
         </div>` : ''}
     </div>`
 }
 
-function buildBlock(): string {
+/** 3D: im offenen Bereich bauen. */
+function buildBlocks(area: Area): string {
   const p = selectedPlacement()
-  const m = selectedMarker()
-  if (m) {
-    const types = CATALOG.map((t, i) => `
-      <button class="type" data-type="${t.id}" aria-pressed="${i === 0}">
-        <span class="type-name">${t.label}</span><span class="type-sub">${t.kind === 'functional' ? 'Vorlage' : 'Fest eingebaut'}</span>
-      </button>`).join('')
-    return `
-      <div class="block">
-        <div class="block-head"><span class="block-title">Bauwerk an „${esc(m.name)}“</span></div>
-        <div class="types">${types}</div>
-        <button class="btn accent" style="width:100%;margin-top:10px" data-act="place">${I.cube}Hier bauen</button>
-      </div>`
-  }
-  const placements = S.project.placements.map(q => {
-    const cur = S.sel?.kind === 'placement' && S.sel.id === q.id
-    const bad = collisions().has(q.id)
+  const list = placementsIn(area.id)
+  const hits = collisions()
+  const items = list.map(q => {
+    const cur = p?.id === q.id
     return `<button class="item" data-placement="${q.id}" aria-current="${cur}"><span class="sq"></span>
       <span class="grow"><span class="item-name" style="display:block">${esc(q.name)}</span>
-      <span class="item-sub">${CATALOG.find(c => c.id === q.source.generator)?.label ?? q.source.generator} · ${q.rotation}°</span></span>
-      ${bad ? '<span class="warn">überschneidet</span>' : ''}</button>`
+      <span class="item-sub">${CATALOG.find(c => c.id === q.source.generator)?.label ?? q.source.generator} · ${coord(q.pos[0])} ${coord(q.pos[1])} ${coord(q.pos[2])}</span></span>
+      ${hits.has(q.id) ? '<span class="warn">überschneidet</span>' : ''}</button>`
   }).join('')
-  if (!p) {
-    return placements ? `<div class="block"><div class="block-head"><span class="block-title">Bauwerke</span></div><div class="list">${placements}</div></div>` : ''
-  }
+  const types = CATALOG.map(t => `
+      <button class="type" data-type="${t.id}" aria-pressed="${S.placing === t.id}">
+        <span class="type-name">${t.label}</span><span class="type-sub">${t.kind === 'functional' ? 'Vorlage' : 'Fest eingebaut'}</span>
+      </button>`).join('')
+
+  let html = `
+    <div class="block">
+      <div class="block-head"><span class="block-title">${esc(area.name)}</span><span class="block-meta">${size(area)}</span></div>
+      <div class="block-head" style="margin:6px 0 8px"><span class="block-title">Bauen</span></div>
+      <div class="types">${types}</div>
+      ${S.placing
+        ? `<p class="note" style="margin:10px 0 8px"><b>Klick</b> setzt das Bauwerk · <b>R</b> dreht · <b>Esc</b> bricht ab</p>
+           <button class="btn" style="width:100%" data-act="cancel-place">Abbrechen</button>`
+        : `<p class="note muted" style="margin:10px 0 0">Typ wählen, dann im Gelände an die Stelle klicken.</p>`}
+    </div>`
+  if (items) html += `<div class="block"><div class="block-head"><span class="block-title">Bauwerke hier</span></div><div class="list">${items}</div></div>`
+  if (!p || p.areaId !== area.id) return html
+
   const { placed } = placedOf(p)
   const b = boundsOf(placed)
   const [w, h, d] = placed.blueprint.size
-  const bad = collisions().has(p.id)
-  return `
+  return html + `
     <div class="block">
-      <div class="block-head"><span class="block-title">${esc(p.name)}</span><span class="block-meta">${w} × ${d} · ${h} hoch</span></div>
+      <div class="block-head"><span class="block-title">Ausgewählt</span><span class="block-meta">${w} × ${d} · ${h} hoch</span></div>
       <div class="stack">
+        <input class="field" id="placement-name" data-rename-placement="${p.id}" value="${esc(p.name)}" aria-label="Name des Bauwerks" />
         <div class="row wrap">
           <button class="btn small icon" data-act="rotL" title="Gegen den Uhrzeigersinn drehen">${I.rotL}</button>
           <button class="btn small icon" data-act="rotR" title="Im Uhrzeigersinn drehen (R)">${I.rotR}</button>
@@ -146,16 +163,15 @@ function buildBlock(): string {
           <span class="grow"></span><span class="small muted">${p.rotation}°</span>
         </div>
         <div class="row wrap" aria-label="Verschieben">
-          <button class="btn small icon" data-nudge="-1,0,0" title="Westen">${I.left}</button>
-          <button class="btn small icon" data-nudge="1,0,0" title="Osten">${I.right}</button>
-          <button class="btn small icon" data-nudge="0,0,-1" title="Norden">${I.up}</button>
-          <button class="btn small icon" data-nudge="0,0,1" title="Süden">${I.down}</button>
+          <button class="btn small icon" data-nudge="-1,0,0" title="Westen (Pfeil links)">${I.left}</button>
+          <button class="btn small icon" data-nudge="1,0,0" title="Osten (Pfeil rechts)">${I.right}</button>
+          <button class="btn small icon" data-nudge="0,0,-1" title="Norden (Pfeil hoch)">${I.up}</button>
+          <button class="btn small icon" data-nudge="0,0,1" title="Süden (Pfeil runter)">${I.down}</button>
           <span class="grow"></span>
-          <button class="btn small" data-nudge="0,-1,0" title="Tiefer">−1</button>
-          <button class="btn small" data-nudge="0,1,0" title="Höher">+1</button>
+          <button class="btn small" data-nudge="0,-1,0" title="Tiefer (Bild runter)">−1</button>
+          <button class="btn small" data-nudge="0,1,0" title="Höher (Bild hoch)">+1</button>
         </div>
-        ${bad ? '<p class="note bad" style="margin:0">Überschneidet sich mit einem anderen Bauwerk.</p>' : ''}
-        <div class="row"><button class="btn primary grow" data-act="open3d">${I.cube}In 3D ansehen</button></div>
+        ${hits.has(p.id) ? '<p class="note bad" style="margin:0">Überschneidet sich mit einem anderen Bauwerk.</p>' : ''}
       </div>
     </div>
     <div class="block">
@@ -171,14 +187,13 @@ function buildBlock(): string {
         <button class="btn" data-act="schem">${I.download}.schem</button>
       </div>
       <div class="row" style="margin-top:12px"><span class="grow"></span><button class="btn small danger" data-act="del-placement">${I.trash}Bauwerk entfernen</button></div>
-    </div>
-    ${S.project.placements.length > 1 ? `<div class="block"><div class="block-head"><span class="block-title">Bauwerke</span></div><div class="list">${placements}</div></div>` : ''}`
+    </div>`
 }
 
 function bind(el: HTMLElement, a: SideActions): void {
   el.querySelectorAll<HTMLElement>('[data-act]').forEach(b => b.addEventListener('click', () => {
     const p = selectedPlacement()
-    const m = selectedMarker()
+    const ar = selectedArea()
     switch (b.dataset.act) {
       case 'folder': return a.connectFolder()
       case 'reopen': return a.reopenFolder()
@@ -188,33 +203,34 @@ function bind(el: HTMLElement, a: SideActions): void {
       case 'close': return a.closeWorld()
       case 'textures': return a.loadTextures()
       case 'theme': return a.toggleTheme()
-      case 'open3d': return a.open3d()
+      case 'draw': return a.drawArea()
+      case 'open-area': return ar && a.openArea(ar.id)
+      case 'del-area': return ar && deleteArea(ar.id)
+      case 'cancel-place': return a.cancelPlacing()
       case 'litematic': return a.exportLitematic()
       case 'schem': return a.exportSchem()
-      case 'del-marker': return m && deleteMarker(m.id)
       case 'del-placement': return p && deletePlacement(p.id)
       case 'rotL': return p && rotatePlacement(p.id, -1)
       case 'rotR': return p && rotatePlacement(p.id, 1)
       case 'mirror': return p && changePlacement(p.id, q => (q.mirror = !q.mirror))
-      case 'place': {
-        if (!m) return
-        const type = el.querySelector<HTMLElement>('.type[aria-pressed="true"]')?.dataset.type ?? CATALOG[0].id
-        placeAtMarker(m.id, type)
-        return
-      }
     }
   }))
   el.querySelectorAll<HTMLElement>('[data-type]').forEach(b => b.addEventListener('click', () => {
-    el.querySelectorAll('[data-type]').forEach(o => o.setAttribute('aria-pressed', String(o === b)))
+    if (S.placing === b.dataset.type) a.cancelPlacing()
+    else a.startPlacing(b.dataset.type!)
   }))
-  el.querySelectorAll<HTMLElement>('[data-marker]').forEach(b => b.addEventListener('click', () => {
-    S.sel = { kind: 'marker', id: b.dataset.marker! }
-    a.focusMarker(b.dataset.marker!)
-    update()
-  }))
+  el.querySelectorAll<HTMLElement>('[data-area]').forEach(b => {
+    b.addEventListener('click', () => {
+      S.sel = { kind: 'area', id: b.dataset.area! }
+      a.focusArea(b.dataset.area!)
+      update()
+    })
+    b.addEventListener('dblclick', () => a.openArea(b.dataset.area!))
+  })
   el.querySelectorAll<HTMLElement>('[data-placement]').forEach(b => b.addEventListener('click', () => {
     S.sel = { kind: 'placement', id: b.dataset.placement! }
     S.guide.layer = null
+    a.focusPlacement(b.dataset.placement!)
     update()
   }))
   el.querySelectorAll<HTMLElement>('[data-nudge]').forEach(b => b.addEventListener('click', () => {
@@ -223,12 +239,14 @@ function bind(el: HTMLElement, a: SideActions): void {
     const [x, y, z] = b.dataset.nudge!.split(',').map(Number)
     nudgePlacement(p.id, [x, y, z])
   }))
-  const input = el.querySelector<HTMLInputElement>('[data-rename]')
-  if (input) {
-    const commit = () => renameMarker(input.dataset.rename!, input.value)
+  const commit = (input: HTMLInputElement | null, fn: (id: string, v: string) => void, attr: string) => {
+    if (!input) return
     input.addEventListener('keydown', e => {
       if (e.key === 'Enter') input.blur()
+      e.stopPropagation() // WASD und R nicht an die 3D-Steuerung geben
     })
-    input.addEventListener('blur', commit)
+    input.addEventListener('blur', () => fn(input.getAttribute(attr)!, input.value))
   }
+  commit(el.querySelector<HTMLInputElement>('[data-rename-area]'), renameArea, 'data-rename-area')
+  commit(el.querySelector<HTMLInputElement>('[data-rename-placement]'), renamePlacement, 'data-rename-placement')
 }

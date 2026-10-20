@@ -13,8 +13,27 @@ export function terrainHeight(x: number, z: number): number {
   return Math.round(64 + 6 * Math.sin(x / 12) + 4 * Math.cos(z / 9))
 }
 
+/** Bäume auf trockenem Gras, fest verteilt, damit es in 3D etwas zu sehen gibt. */
+function treeAt(x: number, z: number): boolean {
+  const h = Math.imul(x * 73856093 ^ z * 19349663, 2654435761) >>> 0
+  return h % 89 === 0 && terrainHeight(x, z) > WATER_LEVEL + 1
+}
+
+const TRUNK = 5
+
 export function testBlock(x: number, y: number, z: number): string {
   const h = terrainHeight(x, z)
+  if (y > h && y <= h + TRUNK + 2) {
+    if (treeAt(x, z) && y <= h + TRUNK) return 'minecraft:oak_log[axis=y]'
+    for (let dz = -2; dz <= 2; dz++)
+      for (let dx = -2; dx <= 2; dx++) {
+        if (!treeAt(x + dx, z + dz)) continue
+        const top = terrainHeight(x + dx, z + dz) + TRUNK
+        const r = y > top ? 1 : 2
+        if (y >= top - 1 && y <= top + 1 && Math.abs(dx) <= r && Math.abs(dz) <= r && (dx || dz || y > top))
+          return 'minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]'
+      }
+  }
   if (y < -60) return 'minecraft:bedrock'
   if (y < h - 3) return 'minecraft:stone'
   if (y < h) return h <= WATER_LEVEL + 1 ? 'minecraft:sand' : 'minecraft:dirt'
@@ -124,13 +143,13 @@ export function makeLevelDat(name = 'Testwelt', dataVersion = 4786): Uint8Array 
   return new NbtFile('', new NbtCompound().set('Data', data), 'gzip', false, undefined).write()
 }
 
-/** Ganze Testwelt: Pfad → Inhalt. Region 0,0 mit 8×8 Chunks, Region -1,0 mit 2×8 Chunks (negative x). */
-export function makeWorld(): Map<string, Uint8Array> {
+/** Ganze Testwelt: Pfad → Inhalt. Region 0,0 mit chunks × chunks Chunks, Region -1,0 mit 2×8 Chunks (negative x). */
+export function makeWorld(chunks = 8): Map<string, Uint8Array> {
   const files = new Map<string, Uint8Array>()
   files.set('level.dat', makeLevelDat())
   const dir = 'dimensions/minecraft/overworld/region'
   const r00: { lx: number; lz: number; nbt: Uint8Array }[] = []
-  for (let lz = 0; lz < 8; lz++) for (let lx = 0; lx < 8; lx++) r00.push({ lx, lz, nbt: makeChunk(lx, lz) })
+  for (let lz = 0; lz < chunks; lz++) for (let lx = 0; lx < chunks; lx++) r00.push({ lx, lz, nbt: makeChunk(lx, lz) })
   files.set(`${dir}/r.0.0.mca`, makeRegion(r00))
   const rm10: { lx: number; lz: number; nbt: Uint8Array }[] = []
   for (let lz = 0; lz < 8; lz++) for (let lx = 30; lx < 32; lx++) rm10.push({ lx, lz, nbt: makeChunk(lx - 32, lz) })

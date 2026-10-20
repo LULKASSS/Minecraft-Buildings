@@ -1,7 +1,8 @@
-// Draufsicht der Welt. Kachelweise, zoom- und verschiebbar, mit Markierungen und Grundrissen.
+// Draufsicht der Welt. Kachelweise, zoom- und verschiebbar. Hier werden Bereiche als Rechteck aufgezogen;
+// gebaut wird erst in der 3D-Ansicht des Bereichs.
 
 import { boundsOf } from '../blueprint/placement'
-import { addMarker, collisions, moveMarker, placedOf, S, toast, update } from '../app/state'
+import { addArea, collisions, MAX_AREA, normalizeRect, placedOf, S, toast, update } from '../app/state'
 import { TILE } from '../world/tile'
 
 const MIN_ZOOM = 1 / 16
@@ -21,10 +22,12 @@ export class MapView {
   private dirty = true
   private colors!: Colors
   private hover: { x: number; z: number } | null = null
-  private drag: { mode: 'pan' | 'marker'; id?: string; sx: number; sy: number; cx: number; cz: number; moved: boolean } | null = null
-  private dragPos: { x: number; z: number } | null = null
+  private drag: { mode: 'pan' | 'rect'; sx: number; sy: number; cx: number; cz: number; wx: number; wz: number; moved: boolean } | null = null
+  private rect: { x0: number; z0: number; x1: number; z1: number } | null = null
+  /** Zeichenmodus: nächstes Ziehen legt einen Bereich an (auch mit gedrückter Umschalttaste). */
+  drawing = false
   private centeredFor: string | null = null
-  onOpen3d: () => void = () => {}
+  onOpen3d: (areaId: string) => void = () => {}
 
   constructor(private host: HTMLElement, private readout: HTMLElement) {
     host.appendChild(this.canvas)
@@ -112,21 +115,19 @@ export class MapView {
     return { sx: (x - this.cx) * this.zoom + r.width / 2, sy: (z - this.cz) * this.zoom + r.height / 2 }
   }
 
-  private markerAt(sx: number, sy: number): string | null {
-    for (const m of [...S.project.markers].reverse()) {
-      const [x, z] = m.points[0]
-      const p = this.toScreen(x + 0.5, z + 0.5)
-      if (Math.hypot(p.sx - sx, p.sy - sy) < 11) return m.id
+  private areaAt(x: number, z: number): string | null {
+    for (const a of [...S.project.areas].reverse()) {
+      if (x >= a.x0 && x <= a.x1 && z >= a.z0 && z <= a.z1) return a.id
     }
     return null
   }
 
-  private placementAt(x: number, z: number): string | null {
-    for (const p of [...S.project.placements].reverse()) {
-      const b = boundsOf(placedOf(p).placed)
-      if (x >= b.min[0] && x < b.max[0] + 1 && z >= b.min[2] && z < b.max[2] + 1) return p.id
-    }
-    return null
+  setDrawing(on: boolean): void {
+    this.drawing = on
+    this.canvas.style.cursor = on ? 'crosshair' : ''
+    this.host.classList.toggle('drawing', on)
+    this.updateReadout()
+    this.invalidate()
   }
 
   private bind(): void {
@@ -141,9 +142,10 @@ export class MapView {
       if (e.button !== 0) return
       const r = c.getBoundingClientRect()
       const sx = e.clientX - r.left, sy = e.clientY - r.top
-      const id = this.markerAt(sx, sy)
+      const w = this.toWorld(sx, sy)
       c.setPointerCapture(e.pointerId)
-      this.drag = { mode: id ? 'marker' : 'pan', id: id ?? undefined, sx, sy, cx: this.cx, cz: this.cz, moved: false }
+      const rect = (this.drawing || e.shiftKey) && !!S.session
+      this.drag = { mode: rect ? 'rect' : 'pan', sx, sy, cx: this.cx, cz: this.cz, wx: Math.floor(w.x), wz: Math.floor(w.z), moved: false }
     })
 
     c.addEventListener('pointermove', e => {
@@ -151,47 +153,42 @@ export class MapView {
       const sx = e.clientX - r.left, sy = e.clientY - r.top
       const w = this.toWorld(sx, sy)
       this.hover = { x: Math.floor(w.x), z: Math.floor(w.z) }
-      this.updateReadout()
       const d = this.drag
       if (d) {
         if (Math.hypot(sx - d.sx, sy - d.sy) > 4) d.moved = true
         if (d.mode === 'pan' && d.moved) {
           this.cx = d.cx - (sx - d.sx) / this.zoom
           this.cz = d.cz - (sy - d.sy) / this.zoom
-        } else if (d.mode === 'marker' && d.moved) {
-          this.dragPos = { x: Math.floor(w.x), z: Math.floor(w.z) }
+        } else if (d.mode === 'rect') {
+          this.rect = normalizeRect(d.wx, d.wz, this.hover.x, this.hover.z)
         }
       }
-      c.style.cursor = d?.mode === 'pan' && d.moved ? 'grabbing' : this.markerAt(sx, sy) ? 'grab' : 'crosshair'
+      this.updateReadout()
+      c.style.cursor = this.drawing || e.shiftKey ? 'crosshair' : d?.mode === 'pan' && d.moved ? 'grabbing' : this.areaAt(this.hover.x, this.hover.z) ? 'pointer' : 'grab'
       this.invalidate()
     })
 
-    c.addEventListener('pointerup', async e => {
+    c.addEventListener('pointerup', e => {
       const d = this.drag
       this.drag = null
       if (!d) return
       const r = c.getBoundingClientRect()
       const w = this.toWorld(e.clientX - r.left, e.clientY - r.top)
       const x = Math.floor(w.x), z = Math.floor(w.z)
-      if (d.mode === 'marker' && d.id) {
-        if (d.moved) {
-          const y = await this.surfaceY(x, z)
-          this.dragPos = null
-          if (y !== null) moveMarker(d.id, x, z, y)
+      if (d.mode === 'rect') {
+        const rect = normalizeRect(d.wx, d.wz, x, z)
+        this.rect = null
+        this.setDrawing(false)
+        if (rect.x1 - rect.x0 < 3 || rect.z1 - rect.z0 < 3) {
+          toast('Zum Aufziehen mit gedrückter Maus ein Rechteck ziehen.')
         } else {
-          S.sel = { kind: 'marker', id: d.id }
-          update()
+          addArea(rect)
+          if (rect.clipped) toast(`Auf ${MAX_AREA} × ${MAX_AREA} Blöcke begrenzt.`)
         }
       } else if (!d.moved) {
-        const pid = this.placementAt(x, z)
-        if (pid) {
-          S.sel = { kind: 'placement', id: pid }
-          update()
-        } else if (S.session) {
-          const y = await this.surfaceY(x, z)
-          if (y === null) toast('Dort ist die Welt noch nicht generiert.', true)
-          else addMarker(x, z, y)
-        }
+        const id = this.areaAt(x, z)
+        S.sel = id ? { kind: 'area', id } : null
+        update()
       }
       this.invalidate()
     })
@@ -199,11 +196,8 @@ export class MapView {
     c.addEventListener('dblclick', e => {
       const r = c.getBoundingClientRect()
       const w = this.toWorld(e.clientX - r.left, e.clientY - r.top)
-      const pid = this.placementAt(Math.floor(w.x), Math.floor(w.z))
-      if (pid) {
-        S.sel = { kind: 'placement', id: pid }
-        this.onOpen3d()
-      }
+      const id = this.areaAt(Math.floor(w.x), Math.floor(w.z))
+      if (id) this.onOpen3d(id)
     })
 
     c.addEventListener('pointerleave', () => {
@@ -213,13 +207,15 @@ export class MapView {
     })
   }
 
-  private async surfaceY(x: number, z: number): Promise<number | null> {
-    return S.session ? S.session.surfaceAtAsync(x, z) : null
-  }
-
   private updateReadout(): void {
-    if (!this.hover || S.view !== 'map') {
-      this.readout.textContent = ''
+    if (S.view !== 'map') return
+    if (this.rect) {
+      const r = this.rect
+      this.readout.innerHTML = `<b>${r.x1 - r.x0 + 1} × ${r.z1 - r.z0 + 1}</b> Blöcke`
+      return
+    }
+    if (!this.hover) {
+      this.readout.textContent = this.drawing ? 'Rechteck mit gedrückter Maus aufziehen' : ''
       return
     }
     const { x, z } = this.hover
@@ -274,37 +270,49 @@ export class MapView {
       ctx.stroke()
     }
 
-    // Grundrisse
-    const hits = collisions()
-    for (const p of S.project.placements) {
-      const b = boundsOf(placedOf(p).placed)
-      const a = this.toScreen(b.min[0], b.min[2])
-      const c = this.toScreen(b.max[0] + 1, b.max[2] + 1)
-      const bad = hits.has(p.id)
-      const sel = S.sel?.kind === 'placement' && S.sel.id === p.id
-      ctx.fillStyle = bad ? this.colors.gapSoft : this.colors.accentSoft
-      ctx.fillRect(a.sx, a.sy, c.sx - a.sx, c.sy - a.sy)
-      if (bad) this.hatch(a.sx, a.sy, c.sx - a.sx, c.sy - a.sy, this.colors.gap)
-      ctx.strokeStyle = bad ? this.colors.gap : this.colors.accent
+    // Bereiche
+    for (const a of S.project.areas) {
+      const p = this.toScreen(a.x0, a.z0)
+      const q = this.toScreen(a.x1 + 1, a.z1 + 1)
+      const sel = (S.sel?.kind === 'area' && S.sel.id === a.id) || S.openArea === a.id
+      ctx.fillStyle = this.colors.accentSoft
+      ctx.globalAlpha = sel ? 1 : 0.6
+      ctx.fillRect(p.sx, p.sy, q.sx - p.sx, q.sy - p.sy)
+      ctx.globalAlpha = 1
+      ctx.strokeStyle = this.colors.accent
       ctx.lineWidth = sel ? 2.5 : 1.5
-      ctx.strokeRect(a.sx, a.sy, c.sx - a.sx, c.sy - a.sy)
-      if (c.sx - a.sx > 40) this.label(p.name, a.sx + 4, a.sy - 8, false)
+      ctx.setLineDash(sel ? [] : [6, 4])
+      ctx.strokeRect(p.sx, p.sy, q.sx - p.sx, q.sy - p.sy)
+      ctx.setLineDash([])
+      this.label(`${a.name} · ${a.x1 - a.x0 + 1} × ${a.z1 - a.z0 + 1}`, p.sx + 8, p.sy - 14, sel)
     }
 
-    // Markierungen
-    for (const m of S.project.markers) {
-      const dragging = this.drag?.mode === 'marker' && this.drag.id === m.id && this.dragPos
-      const [x, z] = dragging ? [this.dragPos!.x, this.dragPos!.z] : m.points[0]
-      const p = this.toScreen(x + 0.5, z + 0.5)
-      const sel = S.sel?.kind === 'marker' && S.sel.id === m.id
-      ctx.beginPath()
-      ctx.arc(p.sx, p.sy, sel ? 7 : 6, 0, Math.PI * 2)
-      ctx.fillStyle = sel ? this.colors.accent : this.colors.surface
-      ctx.fill()
-      ctx.lineWidth = 2.5
+    // Grundrisse der Bauwerke
+    const hits = collisions()
+    for (const pl of S.project.placements) {
+      const b = boundsOf(placedOf(pl).placed)
+      const a = this.toScreen(b.min[0], b.min[2])
+      const c = this.toScreen(b.max[0] + 1, b.max[2] + 1)
+      const bad = hits.has(pl.id)
+      ctx.fillStyle = bad ? this.colors.gapSoft : this.colors.accent
+      ctx.globalAlpha = bad ? 1 : 0.55
+      ctx.fillRect(a.sx, a.sy, c.sx - a.sx, c.sy - a.sy)
+      ctx.globalAlpha = 1
+      if (bad) this.hatch(a.sx, a.sy, c.sx - a.sx, c.sy - a.sy, this.colors.gap)
+      ctx.strokeStyle = bad ? this.colors.gap : this.colors.accent
+      ctx.lineWidth = 1.5
+      ctx.strokeRect(a.sx, a.sy, c.sx - a.sx, c.sy - a.sy)
+    }
+
+    // Rechteck, das gerade aufgezogen wird
+    if (this.rect) {
+      const p = this.toScreen(this.rect.x0, this.rect.z0)
+      const q = this.toScreen(this.rect.x1 + 1, this.rect.z1 + 1)
+      ctx.fillStyle = this.colors.accentSoft
+      ctx.fillRect(p.sx, p.sy, q.sx - p.sx, q.sy - p.sy)
       ctx.strokeStyle = this.colors.accent
-      ctx.stroke()
-      this.label(m.name, p.sx + 12, p.sy, sel)
+      ctx.lineWidth = 2
+      ctx.strokeRect(p.sx, p.sy, q.sx - p.sx, q.sy - p.sy)
     }
 
     // Block unter der Maus

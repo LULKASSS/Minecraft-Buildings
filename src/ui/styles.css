@@ -273,3 +273,28 @@ button { cursor: pointer; }
   .mats { max-height: 260px; }
   .side-scroll { overflow: visible; padding: 16px; }
 }
+
+/* ---------- Bereiche und 3D-Flug ---------- */
+.item .sq.outline { background: transparent; border: 2px dashed var(--accent); }
+.map-draw { position: absolute; top: 14px; left: 14px; z-index: 5; background: var(--surface); box-shadow: var(--shadow); }
+.map-draw:hover { background: var(--surface-2); }
+.map-draw[aria-pressed="true"] { background: var(--accent-ink); color: var(--on-accent); }
+#map.drawing canvas { cursor: crosshair; }
+.crosshair { position: absolute; left: 50%; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; z-index: 6; pointer-events: none; }
+.crosshair::before, .crosshair::after { content: ""; position: absolute; background: #fff; mix-blend-mode: difference; }
+.crosshair::before { left: 8px; top: 0; width: 2px; height: 18px; }
+.crosshair::after { top: 8px; left: 0; height: 2px; width: 18px; }
+.fly-hint {
+  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 5; max-width: calc(100% - 28px);
+  padding: 6px 14px; border-radius: 999px; background: var(--surface); box-shadow: var(--shadow);
+  font-size: 12px; color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
+}
+.fly-hint b { color: var(--fg); font-weight: 500; }
+#three .readout, #stage .readout { bottom: 58px; }
+#map:not([hidden]) ~ .readout { bottom: 14px; }
+.progress {
+  position: absolute; top: 62px; left: 50%; transform: translateX(-50%); z-index: 6; width: 220px;
+  padding: 8px 12px 10px; border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); font-size: 12.5px; color: var(--fg-2);
+}
+.progress i { display: block; height: 3px; margin-top: 6px; border-radius: 2px; background: var(--accent); transition: width .3s var(--ease); }
+#stage.placing #three canvas { cursor: copy; }

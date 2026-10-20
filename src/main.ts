@@ -1,19 +1,17 @@
 import './ui/styles.css'
 import type { Vec3 } from './blueprint/blueprint'
-import { boundsOf } from './blueprint/placement'
-import { loadProject, nudgePlacement, placedOf, rotatePlacement, S, selectedPlacement, subscribe, toast, update } from './app/state'
+import { loadProject, nudgePlacement, placedOf, rotatePlacement, S, selectedArea, selectedPlacement, subscribe, toast, update } from './app/state'
+import { AreaView } from './app/area-view'
 import * as store from './app/store'
 import { WorldSession } from './app/world-session'
 import { writeLitematic } from './export/litematic'
 import { writeSchem } from './export/schem'
 import { MapView } from './map/map-view'
-import { blockLabel, Scene3D } from './render/scene'
 import { loadTextures } from './render/textures-loader'
 import { coord } from './ui/format'
 import { placeThumb, play, renderGuide, step, stop } from './ui/guide'
 import { I } from './ui/icons'
 import { renderSide, type SideActions } from './ui/side-panel'
-import type { AreaResult, Box3 } from './world/area'
 import { makeWorld } from './world/demo-world'
 import { filesFromDrop, FolderSource, UploadSource, ZipSource, type WorldSource } from './world/source'
 import { canConnectFolder, hostDownloads, inFrame } from './app/env'
@@ -28,7 +26,7 @@ function applyTheme(): void {
   if (t === 'system') delete document.documentElement.dataset.theme
   else document.documentElement.dataset.theme = t
   map.themeChanged()
-  scene?.applyTheme()
+  view3d?.scene.applyTheme()
 }
 
 try {
@@ -39,8 +37,7 @@ try {
 // ---------- Ansichten ----------
 
 const map = new MapView($('map'), $('readout'))
-let scene: Scene3D | null = null
-map.onOpen3d = () => setView('3d')
+map.onOpen3d = id => actions.openArea(id)
 applyTheme()
 
 const mapTools = document.createElement('div')
@@ -49,6 +46,12 @@ mapTools.innerHTML = `
   <button class="btn icon" data-z="in" title="Hineinzoomen">${I.plus}</button>
   <button class="btn icon" data-z="out" title="Herauszoomen">${I.minus}</button>
   <button class="btn icon" data-z="spawn" title="Zum Spawn">${I.target}</button>`
+const drawBtn = document.createElement('button')
+drawBtn.className = 'btn map-draw'
+drawBtn.innerHTML = `${I.rect}Bereich aufziehen`
+drawBtn.title = 'Rechteck mit gedrückter Maus aufziehen (oder Umschalttaste + Ziehen)'
+drawBtn.addEventListener('click', () => actions.drawArea())
+$('map').appendChild(drawBtn)
 $('map').appendChild(mapTools)
 mapTools.addEventListener('click', e => {
   const b = (e.target as HTMLElement).closest<HTMLElement>('[data-z]')
@@ -62,11 +65,17 @@ mapTools.addEventListener('click', e => {
 })
 
 function setView(v: 'map' | '3d'): void {
-  if (v === '3d' && !selectedPlacement()) {
-    toast('Erst ein Bauwerk auf der Karte wählen oder platzieren.')
-    v = 'map'
+  if (v === '3d') {
+    const id = S.openArea ?? selectedArea()?.id ?? S.project.areas[0]?.id
+    if (!id) {
+      toast('Erst auf der Karte einen Bereich aufziehen.')
+      return
+    }
+    return actions.openArea(id)
   }
-  S.view = v
+  if (document.pointerLockElement) document.exitPointerLock()
+  S.placing = null
+  S.view = 'map'
   update()
 }
 
@@ -105,7 +114,7 @@ async function openSession(src: WorldSource, demo = false): Promise<void> {
     }
     if (texturesCache) session.setColors(texturesCache.mapColors)
     await loadProject(session.key, session.info.name, session.info.dataVersion)
-    area = null
+    view3d?.close()
     S.view = 'map'
     map.sync()
   } catch (e) {
@@ -177,7 +186,8 @@ const actions: SideActions = {
     S.session = null
     S.sel = null
     S.view = 'map'
-    area = null
+    S.openArea = null
+    view3d?.close()
     update()
   },
   async loadTextures(file?: File) {
@@ -189,8 +199,7 @@ const actions: SideActions = {
       texturesCache = await loadTextures(f)
       S.textures = 'ready'
       S.session?.setColors(texturesCache.mapColors)
-      ensureScene().setTextures(texturesCache.mesher)
-      lastSceneKey = ''
+      view3d?.setTextures(texturesCache.mesher)
       map.invalidate()
       toast(`${texturesCache.count} Texturen geladen.`)
     } catch (e) {
@@ -205,8 +214,27 @@ const actions: SideActions = {
   exportSchem() {
     exportAs('schem')
   },
-  open3d() {
-    setView('3d')
+  openArea(id) {
+    const ar = S.project.areas.find(a => a.id === id)
+    if (!ar || !S.session) return
+    S.openArea = id
+    if (S.sel?.kind !== 'placement' || selectedPlacement()?.areaId !== id) S.sel = { kind: 'area', id }
+    S.view = '3d'
+    map.setDrawing(false)
+    update()
+    void ensureView().open(ar)
+  },
+  drawArea() {
+    if (S.view !== 'map') setView('map')
+    map.setDrawing(!map.drawing)
+  },
+  startPlacing(type) {
+    S.placing = type
+    update()
+  },
+  cancelPlacing() {
+    S.placing = null
+    update()
   },
   toggleTheme() {
     const dark = document.documentElement.dataset.theme === 'dark' || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches)
@@ -215,9 +243,12 @@ const actions: SideActions = {
     applyTheme()
     update()
   },
-  focusMarker(id) {
-    const m = S.project.markers.find(m => m.id === id)
-    if (m) map.focus(m.points[0][0] + 0.5, m.points[0][1] + 0.5)
+  focusArea(id) {
+    const a = S.project.areas.find(a => a.id === id)
+    if (a && S.view === 'map') map.focus((a.x0 + a.x1 + 1) / 2, (a.z0 + a.z1 + 1) / 2)
+  },
+  focusPlacement(id) {
+    view3d?.focusPlacement(id)
   },
 }
 
@@ -267,63 +298,27 @@ async function saveFile(filename: string, bytes: Uint8Array): Promise<'file' | '
   }
 }
 
-// ---------- 3D abgleichen ----------
+// ---------- 3D ----------
 
-let area: AreaResult | null = null
-let areaLoading = false
-let lastSceneKey = ''
-const MARGIN = 20
+let view3d: AreaView | null = null
 
-function ensureScene(): Scene3D {
-  if (!scene) {
-    scene = new Scene3D($('three'))
-    scene.onHover = h => {
-      $('readout').innerHTML = h
-        ? `${blockLabel(h.state)} · X <b>${coord(h.x)}</b> · Y <b>${coord(h.y)}</b> · Z <b>${coord(h.z)}</b>${h.part === 'terrain' ? ' · Gelände' : ''}`
-        : ''
+function ensureView(): AreaView {
+  if (!view3d) {
+    view3d = new AreaView($('three'))
+    if (texturesCache) view3d.setTextures(texturesCache.mesher)
+    const progress = document.createElement('div')
+    progress.className = 'progress'
+    progress.hidden = true
+    $('three').appendChild(progress)
+    view3d.onProgress = (done, total) => {
+      progress.hidden = done >= total
+      progress.innerHTML = `<span>Gelände ${Math.round((done / Math.max(1, total)) * 100)} %</span><i style="width:${(done / Math.max(1, total)) * 100}%"></i>`
     }
-    if (texturesCache) scene.setTextures(texturesCache.mesher)
-  }
-  return scene
-}
-
-function contains(outer: Box3, min: Vec3, max: Vec3): boolean {
-  return min[0] >= outer.x0 + 4 && max[0] <= outer.x1 - 4 && min[2] >= outer.z0 + 4 && max[2] <= outer.z1 - 4 && min[1] >= outer.y0 && max[1] <= outer.y1
-}
-
-async function sync3d(): Promise<void> {
-  const p = selectedPlacement()
-  if (S.view !== '3d' || !p || !S.session) return
-  const sc = ensureScene()
-  const { placed, layers } = placedOf(p)
-  const b = boundsOf(placed)
-  if (!area || !contains(area.box, b.min, b.max)) {
-    if (areaLoading) return
-    areaLoading = true
-    $('stage').classList.add('busy')
-    try {
-      const box: Box3 = {
-        x0: b.min[0] - MARGIN, x1: b.max[0] + MARGIN, z0: b.min[2] - MARGIN, z1: b.max[2] + MARGIN,
-        y0: b.min[1] - 14, y1: b.max[1] + 24,
-      }
-      area = await S.session.area(box)
-      lastSceneKey = ''
-    } catch (e) {
-      toast(`Gelände nicht lesbar: ${(e as Error).message}`, true)
-    } finally {
-      areaLoading = false
-      $('stage').classList.remove('busy')
+    view3d.onAimText = html => {
+      if (S.view === '3d') $('readout').innerHTML = html
     }
-    return sync3d()
   }
-  const key = JSON.stringify([p.id, p.pos, p.rotation, p.mirror, area.box])
-  if (key !== lastSceneKey) {
-    const sameArea = lastSceneKey && JSON.parse(lastSceneKey)[0] === p.id && JSON.stringify(JSON.parse(lastSceneKey)[4]) === JSON.stringify(area.box)
-    if (sameArea) sc.setBuilding(placed, layers)
-    else sc.setScene(area, placed, layers)
-    lastSceneKey = key
-  }
-  sc.setGuide(S.guide.layer, S.guide.single)
+  return view3d
 }
 
 // ---------- Zeichnen ----------
@@ -338,7 +333,10 @@ function render(): void {
   $('switch').hidden = !S.session
   renderEmpty()
   map.invalidate()
-  if (S.view === '3d') void sync3d()
+  drawBtn.hidden = !S.session
+  drawBtn.setAttribute('aria-pressed', String(map.drawing))
+  $('stage').classList.toggle('placing', !!S.placing)
+  if (S.view === '3d') view3d?.sync()
   else if (!S.session) $('readout').textContent = ''
 }
 
@@ -355,7 +353,7 @@ function renderEmpty(): void {
     $('map').appendChild(el)
   }
   const label = S.savedFolder && canConnectFolder() ? `Weiter mit „${S.savedFolder}“` : canConnectFolder() ? 'Welt-Ordner verbinden' : 'Welt-Ordner wählen'
-  el.innerHTML = `<div><h2>Deine Welt als Karte</h2><p>Weltordner hierher ziehen oder wählen, dann einen Bauplatz anklicken.</p>
+  el.innerHTML = `<div><h2>Deine Welt als Karte</h2><p>Weltordner hierher ziehen oder wählen, dann einen Bereich aufziehen.</p>
     <button class="btn primary" data-e="go">${I.folder}${label}</button></div>`
   el.querySelector('[data-e="go"]')!.addEventListener('click', () => (!canConnectFolder() ? actions.uploadFolder() : S.savedFolder ? actions.reopenFolder() : actions.connectFolder()))
 }
@@ -397,7 +395,23 @@ stage.addEventListener('drop', async e => {
 // ---------- Tastatur ----------
 
 window.addEventListener('keydown', e => {
-  if ((e.target as HTMLElement).tagName === 'INPUT') return
+  const t = e.target as HTMLElement
+  if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') return
+  if (e.key === 'Escape') {
+    if (map.drawing) map.setDrawing(false)
+    else if (S.placing) S.placing = null
+    else return
+    update()
+    return
+  }
+  if ((e.key === 'r' || e.key === 'R') && S.placing) {
+    view3d?.rotateGhost(e.shiftKey ? -1 : 1)
+    return
+  }
+  if ((e.key === 'b' || e.key === 'B') && S.view === 'map' && S.session) {
+    actions.drawArea()
+    return
+  }
   const p = selectedPlacement()
   if (!p) return
   const count = placedOf(p).layers.length
@@ -405,17 +419,13 @@ window.addEventListener('keydown', e => {
   if (e.key === '[' || e.key === ']') {
     stop()
     step(e.key === ']' ? 1 : -1, count)
-  } else if (e.key === ' ') {
-    e.preventDefault()
+  } else if (e.key === 'p' || e.key === 'P') {
     S.guide.playing ? stop() : play(count)
   } else if (e.key === 'r' || e.key === 'R') {
     rotatePlacement(p.id, e.shiftKey ? -1 : 1)
   } else if (moves[e.key] && S.view === '3d') {
     e.preventDefault()
     nudgePlacement(p.id, moves[e.key])
-  } else if (e.key === 'Escape') {
-    S.sel = null
-    S.view = 'map'
   } else return
   update()
 })

@@ -22,7 +22,7 @@ export interface VoxelBlock {
 
 export interface MeshOptions {
   /** Ist an dieser Weltposition ein undurchsichtiger Würfel, der Flächen verdeckt? */
-  occludes: (x: number, y: number, z: number) => boolean
+  occludes: (x: number, y: number, z: number, self: BlockState) => boolean
   /** Deckel nie weglassen (für Schichten, deren obere Nachbarn ausgeblendet werden). */
   keepTop?: boolean
   /** Farbe überschreiben, z. B. für Gras und Laub nach Biom. */
@@ -87,7 +87,7 @@ export function meshFallback(blocks: Iterable<VoxelBlock>, opts: MeshOptions): M
           (face === 'up' && y1 === 1) || (face === 'down' && y0 === 0) ||
           (face === 'north' && z0 === 0) || (face === 'south' && z1 === 1) ||
           (face === 'west' && x0 === 0) || (face === 'east' && x1 === 1)
-        if (onEdge && !(face === 'up' && opts.keepTop) && opts.occludes(b.x + n[0], b.y + n[1], b.z + n[2])) continue
+        if (onEdge && !(face === 'up' && opts.keepTop) && opts.occludes(b.x + n[0], b.y + n[1], b.z + n[2], b.state)) continue
         const s = SHADE[face] * j
         const c: RGB = [rgb[0] / 255 * s, rgb[1] / 255 * s, rgb[2] / 255 * s]
         mb.quad(faceVerts(face, b.x + x0, b.y + y0, b.z + z0, b.x + x1, b.y + y1, b.z + z1), n, c)

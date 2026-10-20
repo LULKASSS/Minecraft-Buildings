@@ -151,7 +151,7 @@ class DeepslateMesher implements TexturedMesher {
     return out
   }
 
-  mesh(blocks: VoxelBlock[], occludes: (x: number, y: number, z: number) => boolean, keepTop: boolean): MeshData {
+  mesh(blocks: VoxelBlock[], occludes: (x: number, y: number, z: number, self: BlockState) => boolean, keepTop: boolean): MeshData {
     const mb = new MeshBuilder()
     for (const b of blocks) {
       if (isInvisible(b.state)) continue
@@ -159,7 +159,7 @@ class DeepslateMesher implements TexturedMesher {
       DIRS.forEach((d, i) => {
         if (d === 'up' && keepTop) return
         const o = OFF[d]
-        if (occludes(b.x + o[0], b.y + o[1], b.z + o[2])) mask |= 1 << i
+        if (occludes(b.x + o[0], b.y + o[1], b.z + o[2], b.state)) mask |= 1 << i
       })
       const quads = this.quads(b.state, mask)
       if (quads) {

@@ -21,9 +21,9 @@ src/blueprint/   Bauwerk-Format, Blockstates, Drehen/Spiegeln, Platzierung, Schi
 src/catalog/     Bauwerk-Typen (E1: Testhaus). E2 styles/, E3 functional/, E4 bridge/, village/
 src/world/       Weltquelle (Ordner/Upload/ZIP), level.dat, Region-Leser, Chunk-Dekoder, Kacheln, Gelände-Ausschnitt, Worker
 src/map/         2D-Karte
-src/render/      Blockfarben, vereinfachte Formen, Mesher, Three.js-Szene, Texturen aus der .jar (deepslate)
+src/render/      Blockfarben, vereinfachte Formen, Mesher, Three.js-Szene, Flugsteuerung, Texturen aus der .jar (deepslate)
 src/export/      .litematic (Version 7, SubVersion 1) und .schem (Sponge v3)
-src/app/         Zustand S, IndexedDB, Welt-Sitzung mit Worker-Pool
+src/app/         Zustand S (Bereiche, Bauwerke), IndexedDB, Welt-Sitzung mit Worker-Pool, area-view (3D eines Bereichs)
 src/ui/          Styles (Tokens hell/dunkel), Seitenleiste, Bauanleitung
 ```
 
@@ -41,9 +41,11 @@ Weltformat: ab 26.1 liegen die Regionen in `dimensions/minecraft/overworld/regio
 - Kartenfarben mit .jar: Mittelwert der Oberseiten-Textur mit Standard-Biomtönung, keine echte Biomtönung je Spalte.
 
 ## Stand
+- 20.10.2026 (Fassung 4): Ablauf umgebaut. Karte: Bereich als Rechteck aufziehen (max. 512 × 512). 3D: ganzer Bereich in 32er-Stücken geladen (Höhe aus den Heightmaps, 6 Blöcke Untergrund), frei durchfliegen (WASD, Leertaste/Shift, Strg, Maus; Doppelklick fängt die Maus), dort Bauwerk wählen, Vorschau am Mauszeiger, Klick setzt, R dreht. Lasttest 501 × 501: 11 s mit Software-Grafik.
 - 20.10.2026: Etappe 1 (Durchstich) gebaut: Welt laden (Ordner/ZIP), Karte mit Kacheln und Markierungen, Testhaus platzieren/drehen/spiegeln/verschieben, 3D mit Gelände (einfarbig oder mit .jar-Texturen), Schicht-Anleitung mit Timeline und Materialliste, Export .litematic/.schem. Offen: Test mit Lukas' echter Welt und in Litematica.
 
 ## Verlauf der Fassungen
 - Fassung 1 (20.10.2026): erster Durchstich. Rückmeldung: in der Artifact-Vorschau ließ sich der Weltordner nicht verbinden (Fehler).
 - Fassung 2 (20.10.2026): eingebettet (Artifact) Ordner über Dateiauswahl oder Hineinziehen, Export dort als .zip über den Speichern-Dialog der Plattform. Direkt geöffnet (Pages, lokal) bleibt die dauerhafte Ordner-Verbindung.
-- Rückmeldung zu Fassung 2/3: Ablauf grundsätzlich ändern (siehe Zielkarte „Ablauf“): Bereich zeichnen, Bereich in 3D, frei fliegen, dort platzieren.
+- Fassung 3 (20.10.2026): .jar auch per Hineinziehen, Pfad-Hinweis. Rückmeldung: „warum noch ohne Farbe, wo ist die .jar?“ und Ablauf grundsätzlich ändern (siehe Zielkarte „Ablauf“). Form: Rechteck aufziehen, Bereiche bis ca. 500 × 500.
+- Fassung 4 (20.10.2026): neuer Ablauf Bereich → 3D-Flug → platzieren. Wartet auf Rückmeldung.

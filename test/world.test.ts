@@ -1,14 +1,20 @@
 import { BlobWriter, Uint8ArrayReader, ZipWriter } from '@zip.js/zip.js'
 import { describe, expect, it } from 'vitest'
-import { readArea } from '../src/world/area'
+import { areaGet, readArea, UNDERGROUND } from '../src/world/area'
 import { blockAt, decodeChunk } from '../src/world/chunk'
 import { openWorld, parseLevel } from '../src/world/level'
 import { readChunkBytes, readHeader } from '../src/world/region'
 import { findWorldRoot, UploadSource, ZipSource, type WorldSource } from '../src/world/source'
 import { renderTile, TILE } from '../src/world/tile'
-import { makeWorld, terrainHeight, testBlock, WATER_LEVEL } from '../src/world/demo-world'
+import { makeWorld, testBlock, WATER_LEVEL } from '../src/world/demo-world'
 
 const world = makeWorld()
+
+/** Oberster Block der Testwelt (mit Bäumen). */
+function topOf(x: number, z: number): number {
+  for (let y = 100; y > -64; y--) if (testBlock(x, y, z) !== 'minecraft:air') return y
+  return -64
+}
 
 class MapSource implements WorldSource {
   kind = 'upload' as const
@@ -55,8 +61,7 @@ describe('Region und Chunk', () => {
       for (const [x, y, z] of [[0, 64, 0], [15, 60, 15], [7, -62, 3], [4, 70, 9], [9, 62, 1]]) {
         expect(blockAt(r.chunk, x, y, z)).toBe(testBlock(cx * 16 + x, y, cz * 16 + z))
       }
-      const top = Math.max(terrainHeight(cx * 16 + 2, cz * 16 + 5), WATER_LEVEL)
-      expect(r.chunk.surface[2 + 5 * 16]).toBe(top + 1)
+      expect(r.chunk.surface[2 + 5 * 16]).toBe(topOf(cx * 16 + 2, cz * 16 + 5) + 1)
     }
   })
   it('meldet fehlende Chunks als null', async () => {
@@ -69,7 +74,7 @@ describe('Kartenkachel', () => {
   it('färbt vorhandene Spalten und kennt die Höhe', async () => {
     const t = await renderTile(regionBlob('r.0.0.mca'), 0, 0)
     expect(t.chunks).toBe(64)
-    expect(t.heights[10 + 20 * TILE]).toBe(Math.max(terrainHeight(10, 20), WATER_LEVEL))
+    expect(t.heights[10 + 20 * TILE]).toBe(Math.max(topOf(10, 20), WATER_LEVEL))
     expect(t.rgba[(10 + 20 * TILE) * 4 + 3]).toBe(255)
     expect(t.rgba[(200 + 200 * TILE) * 4 + 3]).toBe(0) // kein Chunk
   })
@@ -117,5 +122,21 @@ describe('Weltordner aus einer Dateiliste', () => {
   })
   it('meldet mehrere Welten statt zu raten', () => {
     expect(() => findWorldRoot(['saves/A/level.dat', 'saves/B/level.dat'])).toThrow(/A, B/)
+  })
+})
+
+describe('Gelände-Ausschnitt ohne feste Höhe', () => {
+  it('nimmt die Höhe aus den Heightmaps: vom tiefsten Oberflächenblock minus Untergrund bis zur höchsten Baumkrone', async () => {
+    const box = { x0: 0, z0: 0, x1: 63, z1: 63, y0: NaN, y1: NaN }
+    const a = await readArea([{ rx: 0, rz: 0, blob: regionBlob('r.0.0.mca') }], box)
+    let lo = Infinity, hi = -Infinity
+    for (let z = 0; z <= 63; z++) for (let x = 0; x <= 63; x++) {
+      const t = topOf(x, z)
+      lo = Math.min(lo, t)
+      hi = Math.max(hi, t)
+    }
+    expect(a.box.y0).toBe(lo - UNDERGROUND)
+    expect(a.box.y1).toBe(hi)
+    expect(areaGet(a, 5, hi, 5) ?? 'minecraft:air').toBe(testBlock(5, hi, 5))
   })
 })

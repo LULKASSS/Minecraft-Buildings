@@ -11,7 +11,7 @@ let timer: number | undefined
 
 export function renderGuide(el: HTMLElement): void {
   const p = selectedPlacement()
-  el.hidden = !p
+  el.hidden = !p || S.view !== '3d'
   if (!p) {
     stop()
     return
@@ -47,7 +47,7 @@ export function renderGuide(el: HTMLElement): void {
         <div class="g-controls">
           <button class="chip" data-g="all" aria-pressed="${g.layer === null}">Alles</button>
           <button class="btn small icon" data-g="prev" title="Ebene tiefer ([)" ${g.layer === 0 ? 'disabled' : ''}>${I.prev}</button>
-          <button class="btn small icon ${g.playing ? '' : 'primary'}" data-g="play" title="Abspielen (Leertaste)">${g.playing ? I.pause : I.play}</button>
+          <button class="btn small icon ${g.playing ? '' : 'primary'}" data-g="play" title="Abspielen (P)">${g.playing ? I.pause : I.play}</button>
           <button class="btn small icon" data-g="next" title="Ebene höher (])" ${g.layer === layers.length - 1 ? 'disabled' : ''}>${I.next}</button>
           <button class="chip" data-g="single" aria-pressed="${g.single}" ${g.layer === null ? 'disabled' : ''}>Nur diese Ebene</button>
         </div>

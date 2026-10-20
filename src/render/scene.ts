@@ -1,91 +1,165 @@
-// 3D-Vorschau: Gelände rund um das Bauwerk, das Bauwerk Schicht für Schicht.
+// 3D-Ansicht eines Bereichs: das ganze Gelände in Stücken, frei durchfliegbar, darin die Bauwerke.
 // Koordinaten in der Szene sind Weltkoordinaten minus "base", damit Float32 auch weit draußen genau bleibt.
 
 import * as THREE from 'three'
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import type { Vec3 } from '../blueprint/blueprint'
-import { shortName, parseState, type BlockState } from '../blueprint/blockstate'
-import type { Layer, Placed } from '../blueprint/placement'
-import type { AreaResult } from '../world/area'
-import { meshFallback, type MeshData, type VoxelBlock } from './mesher'
-import { isOpaqueCube } from './shapes'
+import { parseState, shortName, type BlockState } from '../blueprint/blockstate'
+import { FlyControls } from './fly'
+import type { MeshData } from './mesher'
 import type { TexturedMesher } from './textured'
 
-export interface Hover {
+export interface Aim {
+  /** getroffener Block in Weltkoordinaten */
   x: number
   y: number
   z: number
-  state: BlockState
-  part: 'building' | 'terrain'
+  state: BlockState | null
+  /** Bauwerk, falls der Block zu einem gehört */
+  placementId: string | null
+}
+
+export interface BuildingMeshes {
+  /** eine Geometrie pro Schicht, Koordinaten relativ zu base */
+  layers: MeshData[]
+  /** Gitterlinien je Schicht (Oberseiten der Blöcke) */
+  grids: Float32Array[]
 }
 
 export class Scene3D {
   private renderer: THREE.WebGLRenderer
   private scene = new THREE.Scene()
-  private camera = new THREE.PerspectiveCamera(45, 1, 0.1, 2000)
-  private controls: OrbitControls
-  private base: Vec3 = [0, 0, 0]
-  private terrain: THREE.Mesh | null = null
-  private layerMeshes: THREE.Group[] = []
-  private terrainLookup: ((x: number, y: number, z: number) => BlockState | null) | null = null
-  private buildingLookup = new Map<string, BlockState>()
+  readonly camera = new THREE.PerspectiveCamera(70, 1, 0.05, 1200)
+  readonly fly: FlyControls
+  base: Vec3 = [0, 0, 0]
+  private pieces = new Map<string, THREE.Mesh>()
+  private buildings = new Map<string, { key: string; group: THREE.Group; layers: THREE.Group[] }>()
+  private ghost: THREE.Group | null = null
+  private outline: THREE.LineSegments
+  private crosshair: HTMLElement
+  private hint: HTMLElement
   private needsRender = true
-  private mats: { normal: THREE.Material; current: THREE.Material; terrain: THREE.MeshBasicMaterial; line: THREE.LineBasicMaterial }
+  private mats!: { normal: THREE.Material; current: THREE.MeshBasicMaterial; terrain: THREE.MeshBasicMaterial; ghost: THREE.MeshBasicMaterial; line: THREE.LineBasicMaterial }
   private raycaster = new THREE.Raycaster()
-  private lastFit: string | null = null
+  private mouse: THREE.Vector2 | null = null
+  private last = performance.now()
+  private frame = 0
   textured: TexturedMesher | null = null
-  onHover: (h: Hover | null) => void = () => {}
+  /** Block unter dem Fadenkreuz bzw. Mauszeiger (welche Seite getroffen wurde in "face") */
+  aim: (Aim & { face: Vec3 }) | null = null
+  onAim: (a: (Aim & { face: Vec3 }) | null) => void = () => {}
+  onClick: (a: (Aim & { face: Vec3 }) | null) => void = () => {}
+  onMove: () => void = () => {}
 
   constructor(private host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true })
     this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1))
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     host.appendChild(this.renderer.domElement)
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement)
-    this.controls.enableDamping = true
-    this.controls.dampingFactor = 0.12
-    this.controls.maxPolarAngle = Math.PI * 0.49
-    this.controls.addEventListener('change', () => (this.needsRender = true))
-    this.mats = this.makeMaterials()
+    this.renderer.domElement.tabIndex = 0
+
+    this.fly = new FlyControls(this.camera, this.renderer.domElement)
+    this.fly.onChange = () => {
+      this.needsRender = true
+      this.onMove()
+    }
+
+    this.makeMaterials()
+    const edges = new THREE.EdgesGeometry(new THREE.BoxGeometry(1.004, 1.004, 1.004))
+    edges.translate(0.5, 0.5, 0.5)
+    this.outline = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.55 }))
+    this.outline.visible = false
+    this.scene.add(this.outline)
+
+    this.crosshair = document.createElement('div')
+    this.crosshair.className = 'crosshair'
+    this.crosshair.hidden = true
+    host.appendChild(this.crosshair)
+    this.hint = document.createElement('div')
+    this.hint.className = 'fly-hint'
+    host.appendChild(this.hint)
+    document.addEventListener('pointerlockchange', () => this.lockChanged())
+    this.lockChanged()
+
     this.applyTheme()
     new ResizeObserver(() => this.resize()).observe(host)
-    this.renderer.domElement.addEventListener('pointermove', e => this.pick(e))
-    this.renderer.domElement.addEventListener('pointerleave', () => this.onHover(null))
-    const loop = () => {
-      if (this.controls.update() || this.needsRender) {
-        this.needsRender = false
-        this.renderer.render(this.scene, this.camera)
+
+    const c = this.renderer.domElement
+    let down: { x: number; y: number } | null = null
+    c.addEventListener('pointermove', e => {
+      const r = c.getBoundingClientRect()
+      this.mouse = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1)
+      this.needsAim = true
+    })
+    c.addEventListener('pointerleave', () => {
+      this.mouse = null
+      this.needsAim = true
+    })
+    c.addEventListener('pointerdown', e => (down = { x: e.clientX, y: e.clientY }))
+    c.addEventListener('pointerup', e => {
+      const click = down && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5
+      down = null
+      if (!click) return
+      this.updateAim()
+      this.onClick(this.aim)
+    })
+    c.addEventListener('dblclick', () => void this.fly.lock())
+
+    const loop = (t: number) => {
+      const dt = Math.min(0.1, (t - this.last) / 1000)
+      this.last = t
+      if (this.host.offsetParent !== null) {
+        if (this.fly.update(dt)) this.needsAim = true
+        if (this.needsAim || this.fly.locked) {
+          if (++this.frame % 2 === 0 || this.needsAim) this.updateAim()
+          this.needsAim = false
+        }
+        if (this.needsRender) {
+          this.needsRender = false
+          this.renderer.render(this.scene, this.camera)
+        }
       }
       requestAnimationFrame(loop)
     }
     requestAnimationFrame(loop)
   }
 
-  private makeMaterials() {
+  private needsAim = false
+
+  private lockChanged(): void {
+    const locked = this.fly.locked
+    this.crosshair.hidden = !locked
+    this.hint.innerHTML = locked
+      ? '<b>WASD</b> fliegen · <b>Leertaste</b>/<b>Shift</b> hoch/runter · <b>Strg</b> schneller · <b>Esc</b> Maus frei'
+      : '<b>Ziehen</b> umsehen · <b>WASD</b> fliegen · <b>Leertaste</b>/<b>Shift</b> hoch/runter · <b>Doppelklick</b> Maus fangen'
+    this.needsAim = true
+  }
+
+  private makeMaterials(): void {
     const tex = this.textured?.texture ?? null
-    const opts = tex ? { map: tex, vertexColors: true, alphaTest: 0.1, side: THREE.DoubleSide } : { vertexColors: true }
-    return {
-      normal: new THREE.MeshBasicMaterial(opts),
-      current: new THREE.MeshBasicMaterial({ ...opts, color: new THREE.Color(1, 1, 1) }),
-      terrain: new THREE.MeshBasicMaterial({ ...opts }),
+    const base = tex ? { map: tex, vertexColors: true, alphaTest: 0.1, side: THREE.DoubleSide } : { vertexColors: true }
+    this.mats = {
+      normal: new THREE.MeshBasicMaterial(base),
+      current: new THREE.MeshBasicMaterial({ ...base }),
+      terrain: new THREE.MeshBasicMaterial({ ...base }),
+      ghost: new THREE.MeshBasicMaterial({ ...base, transparent: true, opacity: 0.6, depthWrite: false }),
       line: new THREE.LineBasicMaterial({ color: 0x7f5fe8, transparent: true, opacity: 0.9 }),
     }
   }
 
   applyTheme(): void {
     const cs = getComputedStyle(document.documentElement)
-    const bg = new THREE.Color(cs.getPropertyValue('--stage').trim() || '#ececf1')
+    const sky = new THREE.Color(cs.getPropertyValue('--stage').trim() || '#ececf1')
     const accent = new THREE.Color(cs.getPropertyValue('--accent').trim() || '#7f5fe8')
-    this.scene.background = bg
-    this.scene.fog = new THREE.Fog(bg, 80, 220)
+    this.scene.background = sky
+    this.scene.fog = new THREE.Fog(sky, 160, 420)
     this.mats.line.color = accent
-    ;(this.mats.current as THREE.MeshBasicMaterial).color = new THREE.Color(1, 1, 1).lerp(accent, 0.42)
+    this.mats.current.color = new THREE.Color(1, 1, 1).lerp(accent, 0.42)
     this.needsRender = true
   }
 
   setTextures(t: TexturedMesher | null): void {
     this.textured = t
-    this.mats = this.makeMaterials()
+    this.makeMaterials()
     this.applyTheme()
   }
 
@@ -98,168 +172,182 @@ export class Scene3D {
     this.needsRender = true
   }
 
-  private toGeometry(d: MeshData): THREE.BufferGeometry {
+  private geometry(d: MeshData): THREE.BufferGeometry {
     const g = new THREE.BufferGeometry()
     g.setAttribute('position', new THREE.BufferAttribute(d.positions, 3))
     g.setAttribute('normal', new THREE.BufferAttribute(d.normals, 3))
     g.setAttribute('color', new THREE.BufferAttribute(d.colors, 3))
     if (d.uvs) g.setAttribute('uv', new THREE.BufferAttribute(d.uvs, 2))
     g.setIndex(new THREE.BufferAttribute(d.indices, 1))
+    g.computeBoundingSphere()
     return g
   }
 
-  private mesh(blocks: VoxelBlock[], occludes: (x: number, y: number, z: number) => boolean, keepTop = false): MeshData {
-    return this.textured ? this.textured.mesh(blocks, occludes, keepTop) : meshFallback(blocks, { occludes, keepTop })
+  // ---------- Gelände ----------
+
+  clear(base: Vec3): void {
+    this.base = base
+    for (const m of this.pieces.values()) {
+      this.scene.remove(m)
+      m.geometry.dispose()
+    }
+    this.pieces.clear()
+    for (const id of [...this.buildings.keys()]) this.removeBuilding(id)
+    this.setGhost(null)
+    this.needsRender = true
   }
 
-  /** Gelände setzen. Blöcke, an denen das Bauwerk etwas setzt, werden ausgespart. */
-  setScene(area: AreaResult | null, placed: Placed, layers: Layer[]): void {
-    const [bx, by, bz] = placed.origin
-    this.base = area ? [area.box.x0, area.box.y0, area.box.z0] : [bx - 16, by - 8, bz - 16]
-    const [ox, oy, oz] = this.base
-
-    this.buildingLookup.clear()
-    for (const l of layers) for (const b of l.blocks) this.buildingLookup.set(`${b.x},${b.y},${b.z}`, b.state)
-
-    // Gelände
-    if (this.terrain) {
-      this.scene.remove(this.terrain)
-      this.terrain.geometry.dispose()
-      this.terrain = null
+  setPiece(key: string, data: MeshData | null): void {
+    const old = this.pieces.get(key)
+    if (old) {
+      this.scene.remove(old)
+      old.geometry.dispose()
+      this.pieces.delete(key)
     }
-    this.terrainLookup = null
-    if (area) {
-      const { box, palette, data } = area
-      const w = box.x1 - box.x0 + 1, d = box.z1 - box.z0 + 1
-      const at = (x: number, y: number, z: number): BlockState | null => {
-        if (x < box.x0 || x > box.x1 || y < box.y0 || y > box.y1 || z < box.z0 || z > box.z1) return null
-        const v = data[((y - box.y0) * d + (z - box.z0)) * w + (x - box.x0)]
-        return v ? palette[v] : null
-      }
-      this.terrainLookup = at
-      const opaque = palette.map(s => isOpaqueCube(s))
-      const blocks: VoxelBlock[] = []
-      let i = 0
-      for (let y = box.y0; y <= box.y1; y++)
-        for (let z = box.z0; z <= box.z1; z++)
-          for (let x = box.x0; x <= box.x1; x++, i++) {
-            const v = data[i]
-            if (!v || this.buildingLookup.has(`${x},${y},${z}`)) continue
-            blocks.push({ x: x - ox, y: y - oy, z: z - oz, state: palette[v] })
-          }
-      const occ = (x: number, y: number, z: number) => {
-        const wx = x + ox, wy = y + oy, wz = z + oz
-        if (wx < box.x0 || wx > box.x1 || wz < box.z0 || wz > box.z1) return true // Rand zu, spart Flächen
-        if (wy < box.y0) return true
-        if (wy > box.y1) return false
-        if (this.buildingLookup.has(`${wx},${wy},${wz}`)) return false
-        const v = data[((wy - box.y0) * d + (wz - box.z0)) * w + (wx - box.x0)]
-        return v !== 0 && opaque[v]
-      }
-      this.terrain = new THREE.Mesh(this.toGeometry(this.mesh(blocks, occ)), this.mats.terrain)
-      this.terrain.name = 'terrain'
-      this.scene.add(this.terrain)
+    if (data && data.indices.length) {
+      const m = new THREE.Mesh(this.geometry(data), this.mats.terrain)
+      m.name = 'terrain'
+      m.userData.piece = key
+      this.scene.add(m)
+      this.pieces.set(key, m)
     }
-    this.setBuilding(placed, layers)
+    this.needsRender = true
   }
 
-  /** Nur das Bauwerk neu (nach Drehen/Verschieben, wenn das Gelände-Stück noch reicht). */
-  setBuilding(placed: Placed, layers: Layer[]): void {
-    const [ox, oy, oz] = this.base
-    for (const g of this.layerMeshes) {
-      this.scene.remove(g)
-      g.traverse(o => (o as THREE.Mesh).geometry?.dispose())
-    }
-    this.layerMeshes = []
-    this.buildingLookup.clear()
-    for (const l of layers) for (const b of l.blocks) this.buildingLookup.set(`${b.x},${b.y},${b.z}`, b.state)
-    const solid = new Set<string>()
-    for (const [k, s] of this.buildingLookup) if (isOpaqueCube(s)) solid.add(k)
+  /** Kamera an den Rand des Bereichs stellen, Blick zur Mitte. */
+  overview(x0: number, z0: number, x1: number, z1: number, y: number): void {
+    const [bx, by, bz] = this.base
+    const cx = (x0 + x1) / 2 - bx, cz = (z0 + z1) / 2 - bz
+    const span = Math.max(x1 - x0, z1 - z0)
+    this.camera.position.set(cx, y - by + Math.max(24, span * 0.35), z1 - bz + Math.max(10, span * 0.15))
+    this.fly.lookAt(new THREE.Vector3(cx, y - by, cz))
+  }
 
-    for (const l of layers) {
+  focusOn(min: Vec3, max: Vec3): void {
+    const [bx, by, bz] = this.base
+    const c = new THREE.Vector3((min[0] + max[0] + 1) / 2 - bx, (min[1] + max[1]) / 2 - by, (min[2] + max[2] + 1) / 2 - bz)
+    const r = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2]) + 1
+    this.camera.position.set(c.x + r * 0.9 + 4, c.y + r * 0.7 + 4, c.z + r * 1.1 + 6)
+    this.fly.lookAt(c)
+  }
+
+  /** Weltposition der Kamera, wie F3 im Spiel. */
+  cameraWorld(): Vec3 {
+    const p = this.camera.position
+    return [Math.floor(p.x + this.base[0]), Math.floor(p.y + this.base[1]), Math.floor(p.z + this.base[2])]
+  }
+
+  // ---------- Bauwerke ----------
+
+  setBuilding(id: string, key: string, meshes: BuildingMeshes): void {
+    const old = this.buildings.get(id)
+    if (old?.key === key) return
+    if (old) this.removeBuilding(id)
+    const group = new THREE.Group()
+    const layers = meshes.layers.map((d, i) => {
       const g = new THREE.Group()
-      g.name = `layer-${l.index}`
-      const blocks = l.blocks.map(b => ({ x: b.x - ox, y: b.y - oy, z: b.z - oz, state: b.state }))
-      const occ = (x: number, y: number, z: number) => {
-        const wx = x + ox, wy = y + oy, wz = z + oz
-        if (wy > l.y) return false // darüber kann ausgeblendet sein
-        if (solid.has(`${wx},${wy},${wz}`)) return true
-        const t = this.terrainLookup?.(wx, wy, wz)
-        return wy < l.y && !!t && isOpaqueCube(t) && !this.buildingLookup.has(`${wx},${wy},${wz}`)
-      }
-      const mesh = new THREE.Mesh(this.toGeometry(this.mesh(blocks, occ, true)), this.mats.normal)
+      const mesh = new THREE.Mesh(this.geometry(d), this.mats.normal)
       mesh.name = 'building'
+      mesh.userData.placementId = id
       g.add(mesh)
-      // Raster auf der Oberseite der Blöcke, damit man in der aktuellen Schicht zählen kann
-      const pts: number[] = []
-      for (const b of blocks) {
-        const y = b.y + 1.002
-        pts.push(b.x, y, b.z, b.x + 1, y, b.z, b.x + 1, y, b.z, b.x + 1, y, b.z + 1,
-          b.x + 1, y, b.z + 1, b.x, y, b.z + 1, b.x, y, b.z + 1, b.x, y, b.z)
-      }
       const lg = new THREE.BufferGeometry()
-      lg.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3))
+      lg.setAttribute('position', new THREE.BufferAttribute(meshes.grids[i], 3))
       const lines = new THREE.LineSegments(lg, this.mats.line)
-      lines.visible = false
       lines.name = 'grid'
+      lines.visible = false
       g.add(lines)
-      this.layerMeshes.push(g)
-      this.scene.add(g)
-    }
-
-    const key = `${placed.placement.id}`
-    if (this.lastFit !== key) {
-      this.lastFit = key
-      this.fit(placed)
-    }
-    this.needsRender = true
-  }
-
-  fit(placed: Placed): void {
-    const [w, h, d] = placed.blueprint.size
-    const [x, y, z] = placed.origin
-    const c = new THREE.Vector3(x - this.base[0] + w / 2, y - this.base[1] + h / 3, z - this.base[2] + d / 2)
-    const r = Math.max(w, h, d)
-    const dist = r * 1.05 + 9
-    this.controls.target.copy(c)
-    this.camera.position.set(c.x + dist * 0.75, c.y + dist * 0.7, c.z + dist)
-    this.controls.update()
-    this.needsRender = true
-  }
-
-  /** Schicht-Ansicht: null = ganzes Bauwerk; sonst bis einschließlich layer, bzw. nur layer. */
-  setGuide(layer: number | null, single: boolean): void {
-    this.layerMeshes.forEach((g, i) => {
-      const mesh = g.getObjectByName('building') as THREE.Mesh
-      const grid = g.getObjectByName('grid') as THREE.LineSegments
-      if (layer === null) {
-        g.visible = true
-        mesh.material = this.mats.normal
-        grid.visible = false
-        return
-      }
-      g.visible = single ? i === layer : i <= layer
-      mesh.material = i === layer ? this.mats.current : this.mats.normal
-      grid.visible = i === layer
+      group.add(g)
+      return g
     })
+    this.scene.add(group)
+    this.buildings.set(id, { key, group, layers })
+    this.needsRender = true
+  }
+
+  removeBuilding(id: string): void {
+    const b = this.buildings.get(id)
+    if (!b) return
+    this.scene.remove(b.group)
+    b.group.traverse(o => (o as THREE.Mesh).geometry?.dispose())
+    this.buildings.delete(id)
+    this.needsRender = true
+  }
+
+  buildingIds(): string[] {
+    return [...this.buildings.keys()]
+  }
+
+  /** Schicht-Ansicht für ein Bauwerk: null = ganz; sonst bis einschließlich layer bzw. nur layer. */
+  setGuide(selected: string | null, layer: number | null, single: boolean): void {
+    for (const [id, b] of this.buildings) {
+      const active = id === selected && layer !== null
+      b.layers.forEach((g, i) => {
+        const mesh = g.getObjectByName('building') as THREE.Mesh
+        const grid = g.getObjectByName('grid') as THREE.LineSegments
+        g.visible = !active || (single ? i === layer : i <= layer!)
+        mesh.material = active && i === layer ? this.mats.current : this.mats.normal
+        grid.visible = active && i === layer
+      })
+    }
     this.mats.terrain.color.setScalar(layer === null ? 1 : 0.72)
     this.needsRender = true
   }
 
-  private pick(e: PointerEvent): void {
-    const r = this.renderer.domElement.getBoundingClientRect()
-    const ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1)
+  // ---------- Vorschau beim Platzieren ----------
+
+  setGhost(data: MeshData | null): void {
+    if (this.ghost) {
+      this.scene.remove(this.ghost)
+      this.ghost.traverse(o => (o as THREE.Mesh).geometry?.dispose())
+      this.ghost = null
+    }
+    if (data) {
+      this.ghost = new THREE.Group()
+      this.ghost.add(new THREE.Mesh(this.geometry(data), this.mats.ghost))
+      this.ghost.visible = false
+      this.scene.add(this.ghost)
+    }
+    this.needsRender = true
+  }
+
+  /** Vorschau so legen, dass ihre kleinste Ecke auf der Weltposition origin liegt. */
+  moveGhost(origin: Vec3 | null): void {
+    if (!this.ghost) return
+    this.ghost.visible = !!origin
+    if (origin) this.ghost.position.set(origin[0] - this.base[0], origin[1] - this.base[1], origin[2] - this.base[2])
+    this.needsRender = true
+  }
+
+  // ---------- Zielen ----------
+
+  private updateAim(): void {
+    const ndc = this.fly.locked ? new THREE.Vector2(0, 0) : this.mouse
+    if (!ndc) {
+      this.setAim(null)
+      return
+    }
     this.raycaster.setFromCamera(ndc, this.camera)
-    const targets: THREE.Object3D[] = []
-    for (const g of this.layerMeshes) if (g.visible) targets.push(g.getObjectByName('building')!)
-    if (this.terrain) targets.push(this.terrain)
+    this.raycaster.far = 300
+    const targets: THREE.Object3D[] = [...this.pieces.values()]
+    for (const b of this.buildings.values()) b.group.traverse(o => { if (o.name === 'building' && o.parent?.visible) targets.push(o) })
     const hit = this.raycaster.intersectObjects(targets, false)[0]
-    if (!hit || !hit.face) return this.onHover(null)
-    const p = hit.point.clone().addScaledVector(hit.face.normal, -0.01)
+    if (!hit?.face) {
+      this.setAim(null)
+      return
+    }
+    const n = hit.face.normal
+    const p = hit.point.clone().addScaledVector(n, -0.01)
     const x = Math.floor(p.x) + this.base[0], y = Math.floor(p.y) + this.base[1], z = Math.floor(p.z) + this.base[2]
-    const inBuilding = hit.object.name === 'building'
-    const state = inBuilding ? this.buildingLookup.get(`${x},${y},${z}`) : this.terrainLookup?.(x, y, z)
-    this.onHover(state ? { x, y, z, state, part: inBuilding ? 'building' : 'terrain' } : null)
+    this.setAim({ x, y, z, state: null, placementId: (hit.object.userData.placementId as string) ?? null, face: [Math.round(n.x), Math.round(n.y), Math.round(n.z)] })
+  }
+
+  private setAim(a: (Aim & { face: Vec3 }) | null): void {
+    const same = a && this.aim && a.x === this.aim.x && a.y === this.aim.y && a.z === this.aim.z && a.placementId === this.aim.placementId
+    this.aim = a
+    this.outline.visible = !!a
+    if (a) this.outline.position.set(a.x - this.base[0], a.y - this.base[1], a.z - this.base[2])
+    this.needsRender = true
+    if (!same) this.onAim(a)
   }
 
   snapshot(): string {

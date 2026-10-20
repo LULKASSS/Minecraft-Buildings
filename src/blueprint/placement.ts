@@ -10,6 +10,7 @@ export interface Placement {
   id: string
   name: string
   markerId?: string
+  areaId?: string
   source: BlueprintSource
   pos: Vec3
   rotation: Rotation
