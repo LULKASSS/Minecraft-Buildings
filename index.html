@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Basenplaner</title>
+  <meta name="description" content="Minecraft-Base planen: Welt laden, Bauwerk platzieren, Schicht für Schicht nachbauen." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='2' width='12' height='12' rx='2' fill='%237F5FE8'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <div id="app">
+    <aside id="side" aria-label="Auswahl"></aside>
+    <main id="main">
+      <section id="stage">
+        <div id="map" class="view"></div>
+        <div id="three" class="view" hidden></div>
+        <div id="switch" class="seg" role="tablist" aria-label="Ansicht">
+          <button role="tab" data-view="map" class="seg-btn">Karte</button>
+          <button role="tab" data-view="3d" class="seg-btn">3D</button>
+          <span class="seg-thumb" aria-hidden="true"></span>
+        </div>
+        <div id="readout" class="readout" aria-live="polite"></div>
+        <div id="toast" class="toast" role="status" hidden></div>
+      </section>
+      <section id="guide" aria-label="Bauanleitung" hidden></section>
+    </main>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
