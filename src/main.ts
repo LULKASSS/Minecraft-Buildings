@@ -15,7 +15,9 @@ import { I } from './ui/icons'
 import { renderSide, type SideActions } from './ui/side-panel'
 import type { AreaResult, Box3 } from './world/area'
 import { makeWorld } from './world/demo-world'
-import { FolderSource, UploadSource, ZipSource, type WorldSource } from './world/source'
+import { filesFromDrop, FolderSource, UploadSource, ZipSource, type WorldSource } from './world/source'
+import { canConnectFolder, hostDownloads, inFrame } from './app/env'
+import { BlobWriter, Uint8ArrayReader, ZipWriter } from '@zip.js/zip.js'
 
 const $ = (id: string) => document.getElementById(id)!
 
@@ -160,7 +162,12 @@ const actions: SideActions = {
   },
   async uploadFolder() {
     const files = await pickFile('', true)
-    if (files.length) await openSession(new UploadSource(files))
+    if (!files.length) return
+    try {
+      await openSession(UploadSource.fromFiles(files))
+    } catch (e) {
+      toast(String((e as Error).message ?? e), true)
+    }
   },
   demo() {
     void openSession(new MemorySource(makeWorld()), true)
@@ -222,13 +229,42 @@ function exportAs(kind: 'litematic' | 'schem'): void {
   const { placed } = placedOf(p)
   const meta = { name: p.name, dataVersion: S.project.dataVersion, description: `Ursprung ${placed.origin.join(' ')}` }
   const bytes = kind === 'litematic' ? writeLitematic(placed.blueprint, meta) : writeSchem(placed.blueprint, meta)
-  const url = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' }))
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `${p.name.replace(/[^\p{L}\p{N} _-]/gu, '').trim() || 'bauwerk'}.${kind}`
-  a.click()
-  setTimeout(() => URL.revokeObjectURL(url), 2000)
-  if (kind === 'litematic') toast(`Gespeichert. In Litematica auf ${placed.origin.map(coord).join(' ')} setzen.`)
+  const filename = `${p.name.replace(/[^\p{L}\p{N} _-]/gu, '').trim() || 'bauwerk'}.${kind}`
+  void saveFile(filename, bytes).then(how => {
+    if (!how) return
+    const where = `In Litematica auf ${placed.origin.map(coord).join(' ')} setzen.`
+    toast(how === 'zip' ? `Als ZIP gespeichert (die Vorschau erlaubt keine .${kind}). Entpacken, dann ${where}` : `Gespeichert. ${where}`)
+  })
+}
+
+/** Normal als Download; eingebettet über den Speichern-Dialog der Plattform, die nur bestimmte Endungen erlaubt (u. a. .zip). */
+async function saveFile(filename: string, bytes: Uint8Array): Promise<'file' | 'zip' | null> {
+  const blob = new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'application/octet-stream' })
+  if (!inFrame) {
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 2000)
+    return 'file'
+  }
+  const dl = await hostDownloads()
+  if (!dl) {
+    toast('Speichern geht in dieser eingebetteten Ansicht nicht. Bitte die App direkt öffnen.', true)
+    return null
+  }
+  const zw = new ZipWriter(new BlobWriter('application/zip'))
+  await zw.add(filename, new Uint8ArrayReader(bytes))
+  const zip = await zw.close()
+  try {
+    await dl.save({ filename: `${filename}.zip`, data: zip })
+    return 'zip'
+  } catch (e) {
+    const code = (e as { code?: string }).code
+    if (code !== 'declined') toast(`Speichern nicht möglich (${code ?? 'Fehler'}).`, true)
+    return null
+  }
 }
 
 // ---------- 3D abgleichen ----------
@@ -318,12 +354,43 @@ function renderEmpty(): void {
     el.className = 'empty'
     $('map').appendChild(el)
   }
-  el.innerHTML = `<div><h2>Deine Welt als Karte</h2><p>Links die Welt verbinden, dann einen Bauplatz anklicken.</p>
-    <button class="btn primary" data-e="go">${I.folder}${S.savedFolder ? `Weiter mit „${S.savedFolder}“` : 'Welt-Ordner verbinden'}</button></div>`
-  el.querySelector('[data-e="go"]')!.addEventListener('click', () => (S.savedFolder ? actions.reopenFolder() : 'showDirectoryPicker' in window ? actions.connectFolder() : actions.uploadFolder()))
+  const label = S.savedFolder && canConnectFolder() ? `Weiter mit „${S.savedFolder}“` : canConnectFolder() ? 'Welt-Ordner verbinden' : 'Welt-Ordner wählen'
+  el.innerHTML = `<div><h2>Deine Welt als Karte</h2><p>Weltordner hierher ziehen oder wählen, dann einen Bauplatz anklicken.</p>
+    <button class="btn primary" data-e="go">${I.folder}${label}</button></div>`
+  el.querySelector('[data-e="go"]')!.addEventListener('click', () => (!canConnectFolder() ? actions.uploadFolder() : S.savedFolder ? actions.reopenFolder() : actions.connectFolder()))
 }
 
 subscribe(render)
+
+// ---------- Ordner oder ZIP hineinziehen ----------
+
+const stage = $('stage')
+stage.addEventListener('dragover', e => {
+  if (!e.dataTransfer?.types.includes('Files')) return
+  e.preventDefault()
+  stage.classList.add('drop')
+})
+stage.addEventListener('dragleave', e => {
+  if (e.target === stage || !stage.contains(e.relatedTarget as Node)) stage.classList.remove('drop')
+})
+stage.addEventListener('drop', async e => {
+  e.preventDefault()
+  stage.classList.remove('drop')
+  const dt = e.dataTransfer
+  if (!dt) return
+  try {
+    const zip = [...dt.files].find(f => /\.zip$/i.test(f.name))
+    if (zip && dt.files.length === 1) return await openSession(await ZipSource.open(zip))
+    S.busy = 'Ordner wird gelesen …'
+    update()
+    const entries = await filesFromDrop(dt.items)
+    await openSession(new UploadSource(entries))
+  } catch (err) {
+    S.busy = null
+    toast(String((err as Error).message ?? err), true)
+    update()
+  }
+})
 
 // ---------- Tastatur ----------
 

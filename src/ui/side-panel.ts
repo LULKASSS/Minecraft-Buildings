@@ -8,6 +8,7 @@ import {
 } from '../app/state'
 import { coord, esc, num } from '../ui/format'
 import { I } from './icons'
+import { canConnectFolder } from '../app/env'
 
 export interface SideActions {
   connectFolder(): void
@@ -49,15 +50,15 @@ function isDark(): boolean {
 function worldBlock(): string {
   const s = S.session
   if (!s) {
-    const hasPicker = 'showDirectoryPicker' in window
+    const hasPicker = canConnectFolder()
     return `
     <div class="block">
       <div class="block-head"><span class="block-title">Welt</span></div>
       <div class="stack">
-        ${S.savedFolder ? `<button class="btn primary" data-act="reopen">${I.folder}Weiter mit „${esc(S.savedFolder)}“</button>` : ''}
+        ${S.savedFolder && hasPicker ? `<button class="btn primary" data-act="reopen">${I.folder}Weiter mit „${esc(S.savedFolder)}“</button>` : ''}
         ${hasPicker ? `<button class="btn ${S.savedFolder ? '' : 'primary'}" data-act="folder">${I.folder}Welt-Ordner verbinden</button>` : `<button class="btn primary" data-act="upload">${I.folder}Welt-Ordner wählen</button>`}
         <button class="btn" data-act="zip">${I.zip}ZIP wählen</button>
-        <p class="note muted" style="margin:4px 0 0">Unter <b>saves</b> im Minecraft-Ordner, der Ordner mit <b>level.dat</b>. Die Welt bleibt auf diesem Rechner.</p>
+        <p class="note muted" style="margin:4px 0 0">Unter <b>saves</b> im Minecraft-Ordner, der Ordner mit <b>level.dat</b>. Geht auch per Hineinziehen. Die Welt bleibt auf diesem Rechner.</p>
         <div><button class="linkish" data-act="demo">Mit Testwelt ausprobieren</button></div>
       </div>
     </div>`

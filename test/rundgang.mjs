@@ -76,7 +76,40 @@ async function run(theme, width, height) {
   await page.close()
 }
 
+// Wie im Claude-Artifact: App in einer fremden Seite eingebettet. Dort gibt es keinen showDirectoryPicker,
+// der Weltordner kommt über die Dateiauswahl.
+async function eingebettet() {
+  const { execFileSync } = await import('node:child_process')
+  const dir = execFileSync(process.execPath, ['--experimental-strip-types', new URL('./welt-ordner.mjs', import.meta.url).pathname, `${OUT}Realm Testwelt`]).toString().trim()
+  const { createServer } = await import('node:http')
+  const host = createServer((_, res) => {
+    res.setHeader('content-type', 'text/html')
+    res.end(`<!doctype html><body style="margin:0"><iframe src="http://localhost:${PORT}/" style="border:0;width:100vw;height:100vh"></iframe>`)
+  }).listen(PORT + 1)
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+  page.on('pageerror', e => fail(`eingebettet: ${e.message}`))
+  await page.goto(`http://127.0.0.1:${PORT + 1}/`)
+  const frame = page.frameLocator('iframe')
+  await frame.locator('[data-act="upload"]').waitFor({ timeout: 8000 })
+  if (await frame.locator('[data-act="folder"]').count()) fail('eingebettet: Knopf "verbinden" sichtbar, der dort nicht geht')
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), frame.locator('[data-act="upload"]').click()])
+  await chooser.setFiles(dir)
+  await frame.locator('.world-name').waitFor({ timeout: 10000 })
+  const name = await frame.locator('.world-name').textContent()
+  if (name !== 'Testwelt') fail(`eingebettet: Welt heißt "${name}"`)
+  await page.waitForTimeout(1200)
+  const box = await frame.locator('#map canvas').boundingBox()
+  await page.mouse.click(box.x + box.width / 2 + 24, box.y + box.height / 2 + 10)
+  await frame.locator('[data-act="place"]').click()
+  await frame.locator('[data-act="open3d"]').click()
+  await page.waitForTimeout(2000)
+  await page.screenshot({ path: `${OUT}09-eingebettet-ordner.png` })
+  await page.close()
+  host.close()
+}
+
 try {
+  await eingebettet()
   await run('light', 1440, 900)
   await run('dark', 1440, 900)
   await run('light', 1024, 700)

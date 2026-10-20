@@ -4,7 +4,7 @@ import { readArea } from '../src/world/area'
 import { blockAt, decodeChunk } from '../src/world/chunk'
 import { openWorld, parseLevel } from '../src/world/level'
 import { readChunkBytes, readHeader } from '../src/world/region'
-import { ZipSource, type WorldSource } from '../src/world/source'
+import { findWorldRoot, UploadSource, ZipSource, type WorldSource } from '../src/world/source'
 import { renderTile, TILE } from '../src/world/tile'
 import { makeWorld, terrainHeight, testBlock, WATER_LEVEL } from '../src/world/demo-world'
 
@@ -98,5 +98,24 @@ describe('ZIP', () => {
     const w = await openWorld(src)
     expect(w.name).toBe('Testwelt')
     expect(w.regions).toHaveLength(2)
+  })
+})
+
+describe('Weltordner aus einer Dateiliste', () => {
+  const f = (path: string, data: Uint8Array = new Uint8Array(1)) => ({ path, file: new File([data as Uint8Array<ArrayBuffer>], path.split('/').pop()!) })
+
+  it('findet den Weltordner auch eine Ebene tiefer und liest die Welt', async () => {
+    const entries = [...world].map(([p, d]) => f(`Realm Welt/${p}`, d))
+    entries.push(f('Realm Welt/level.dat_old'), f('Realm Welt/players/data/x.dat'))
+    const src = new UploadSource(entries)
+    expect(src.name).toBe('Realm Welt')
+    const w = await openWorld(src)
+    expect(w.regions).toHaveLength(2)
+  })
+  it('meldet, wenn kein Weltordner dabei ist', () => {
+    expect(() => findWorldRoot(['saves/x/region/r.0.0.mca'])).toThrow(/level\.dat/)
+  })
+  it('meldet mehrere Welten statt zu raten', () => {
+    expect(() => findWorldRoot(['saves/A/level.dat', 'saves/B/level.dat'])).toThrow(/A, B/)
   })
 })

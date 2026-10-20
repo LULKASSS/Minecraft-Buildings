@@ -60,21 +60,42 @@ export class FolderSource implements WorldSource {
   }
 }
 
-// ---- einmal hochgeladener Ordner (<input webkitdirectory>) oder lose Dateien ----
+// ---- einmal gewählter oder hineingezogener Ordner (<input webkitdirectory>, Drag & Drop) ----
+
+export interface PathFile {
+  path: string // relativ zum gewählten Ordner, mit "/" getrennt
+  file: File
+}
+
+/** Weltordner in einer Dateiliste finden: der flachste Ordner mit level.dat. */
+export function findWorldRoot(paths: string[]): string {
+  const levels = paths.filter(p => p === 'level.dat' || p.endsWith('/level.dat'))
+  if (!levels.length) throw new Error('Keine level.dat gefunden. Bitte den Ordner der Welt wählen (den mit level.dat darin).')
+  const depth = (p: string) => p.split('/').length
+  const min = Math.min(...levels.map(depth))
+  const top = levels.filter(p => depth(p) === min)
+  if (top.length > 1) {
+    const names = top.map(p => p.split('/').slice(-2, -1)[0] ?? p).join(', ')
+    throw new Error(`Hier liegen mehrere Welten (${names}). Bitte genau einen Weltordner wählen.`)
+  }
+  return top[0].slice(0, -'level.dat'.length)
+}
 
 export class UploadSource implements WorldSource {
   kind = 'upload' as const
   private files = new Map<string, File>()
   name: string
 
-  constructor(files: File[]) {
-    const level = files.find(f => rel(f).endsWith('level.dat') && rel(f).split('/').length <= 2)
-    const prefix = level ? rel(level).slice(0, -'level.dat'.length) : ''
-    this.name = prefix.replace(/\/$/, '') || 'Welt'
-    for (const f of files) {
-      const p = rel(f)
-      if (p.startsWith(prefix)) this.files.set(p.slice(prefix.length), f)
+  constructor(entries: PathFile[]) {
+    const prefix = findWorldRoot(entries.map(e => e.path))
+    this.name = prefix.replace(/\/$/, '').split('/').pop() || 'Welt'
+    for (const e of entries) {
+      if (e.path.startsWith(prefix)) this.files.set(e.path.slice(prefix.length), e.file)
     }
+  }
+
+  static fromFiles(files: File[]): UploadSource {
+    return new UploadSource(files.map(f => ({ path: rel(f), file: f })))
   }
 
   async read(path: string): Promise<WorldFile | null> {
@@ -86,6 +107,28 @@ export class UploadSource implements WorldSource {
     const pre = dir.replace(/\/?$/, '/')
     return [...this.files.keys()].filter(k => k.startsWith(pre) && !k.slice(pre.length).includes('/')).map(k => k.slice(pre.length))
   }
+}
+
+/** Hineingezogene Ordner durchlaufen (geht auch in eingebetteten Seiten, anders als showDirectoryPicker). */
+export async function filesFromDrop(items: DataTransferItemList): Promise<PathFile[]> {
+  const roots = [...items].map(i => i.webkitGetAsEntry?.()).filter((e): e is FileSystemEntry => !!e)
+  const out: PathFile[] = []
+  const walk = async (entry: FileSystemEntry, path: string): Promise<void> => {
+    if (entry.isFile) {
+      const file = await new Promise<File>((res, rej) => (entry as FileSystemFileEntry).file(res, rej))
+      out.push({ path, file })
+      return
+    }
+    const reader = (entry as FileSystemDirectoryEntry).createReader()
+    for (;;) {
+      // readEntries liefert in Portionen (Chrome: 100), bis eine leere Liste kommt
+      const batch = await new Promise<FileSystemEntry[]>((res, rej) => reader.readEntries(res, rej))
+      if (!batch.length) break
+      await Promise.all(batch.map(e => walk(e, `${path}/${e.name}`)))
+    }
+  }
+  await Promise.all(roots.map(r => walk(r, r.name)))
+  return out
 }
 
 function rel(f: File): string {
