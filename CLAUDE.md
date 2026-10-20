@@ -2,7 +2,7 @@
 
 ## Ziel
 - Wofür: eine Bauidee an der echten Stelle der eigenen Welt prüfen und sie danach ohne Rätselraten im Spiel nachbauen.
-- Wer, wann: Lukas, am Mac in Chrome, vor oder während einer Minecraft-Sitzung (Java 26.x).
+- Wer, wann: Lukas, am Mac in Chrome, vor oder während einer Minecraft-Sitzung (Java 26.x). Seine Welt ist ein Realm, sie kommt als heruntergeladener Ordner, nicht als ZIP.
 - Gelungen, wenn: das Bauwerk steht in Litematica exakt dort, wo es in der App stand, und die Materialliste reicht genau.
 - Abgenommen: noch nichts (Etappe 1 liegt zur Abnahme, Stand 20.10.2026).
 - Nicht gewollt: frei generierte Farmen/Redstone, mitgelieferte Mojang-Texturen, Blau in der Oberfläche, Template-Look, Titelbalken oben links.
@@ -43,4 +43,5 @@ Weltformat: ab 26.1 liegen die Regionen in `dimensions/minecraft/overworld/regio
 - 20.10.2026: Etappe 1 (Durchstich) gebaut: Welt laden (Ordner/ZIP), Karte mit Kacheln und Markierungen, Testhaus platzieren/drehen/spiegeln/verschieben, 3D mit Gelände (einfarbig oder mit .jar-Texturen), Schicht-Anleitung mit Timeline und Materialliste, Export .litematic/.schem. Offen: Test mit Lukas' echter Welt und in Litematica.
 
 ## Verlauf der Fassungen
-- Fassung 1 (20.10.2026): erster Durchstich, wartet auf Rückmeldung.
+- Fassung 1 (20.10.2026): erster Durchstich. Rückmeldung: in der Artifact-Vorschau ließ sich der Weltordner nicht verbinden (Fehler).
+- Fassung 2 (20.10.2026): eingebettet (Artifact) Ordner über Dateiauswahl oder Hineinziehen, Export dort als .zip über den Speichern-Dialog der Plattform. Direkt geöffnet (Pages, lokal) bleibt die dauerhafte Ordner-Verbindung.
