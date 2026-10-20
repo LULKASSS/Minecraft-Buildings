@@ -18,7 +18,8 @@
 ## Aufbau
 ```
 src/blueprint/   Bauwerk-Format, Blockstates, Drehen/Spiegeln, Platzierung, Schichten, Material
-src/catalog/     Bauwerk-Typen (E1: Testhaus). E2 styles/, E3 functional/, E4 bridge/, village/
+src/catalog/     Bauwerk-Typen: styles (5 Stile), house, small (Turm, Brunnen, Laterne, Marktstand), nature (Bäume, Busch, Fels, Natur-Pinsel), template (Vorlagen-Import mit Fassade)
+src/style/       Blockkatalog (Familien, Material, Survival-Aufwand, Treppenformen und Verbindungen wie im Spiel), Paletten nach Rollen, Baukasten, Paletten-Lernen
 src/world/       Weltquelle (Ordner/Upload/ZIP), level.dat, Region-Leser, Chunk-Dekoder, Kacheln, Gelände-Ausschnitt, Worker
 src/map/         2D-Karte
 src/render/      Blockfarben, vereinfachte Formen, Mesher, Three.js-Szene, Flugsteuerung, Texturen aus der .jar (deepslate)
@@ -39,8 +40,12 @@ Weltformat: ab 26.1 liegen die Regionen in `dimensions/minecraft/overworld/regio
 - Annahme: Litematica 26.x liest Schematic-Version 7 / SubVersion 1 wie in 1.21.11 (Quelltext geprüft für 1.21.11). Beweis steht aus: Lukas' Test im Spiel.
 - Annahme: Bauwerke werden mit dem Anker auf den obersten Block der Markierung gesetzt (Boden ersetzt den Geländeblock).
 - Kartenfarben mit .jar: Mittelwert der Oberseiten-Textur mit Standard-Biomtönung, keine echte Biomtönung je Spalte.
+- Annahme: Verbindungen von Zäunen/Scheiben/Mauern sind vereinfacht nachgerechnet (gleichartige Blöcke, Zauntore, volle Blöcke). Seltene Sonderfälle können in Litematica als „falscher Zustand“ erscheinen.
+- Annahme: Luft innerhalb eines Bauwerks zeigt Litematica als „zu entfernen“ an, wo Gelände steht. Gewollt im Haus, am Rand (Dachüberstand) noch im Spiel zu prüfen.
+- Survival-Aufwand ist eine grobe Einstufung (1 liegt herum … 4 selten), keine Rechnung.
 
 ## Stand
+- 20.10.2026 (Fassung 5): Inhalte nach `docs/inhalte.md` gebaut. Blockkatalog, 12 Paletten nach Rollen (Sockel, Wand, Balken, Dach, Kante, Boden, Fenster, Tür, Holz, Licht, Stoff, Weg), Paletten aus einem Bereich lernen. 5 Stile (Mittelalter, Japan, Modern, Wüste, Steampunk) mit Haus-Generator (Fachwerk/Pfosten, Fensterläden, Blumenkästen, Markisen, Sattel-/Pagoden-/Flachdach/Brüstung, Vordach mit Laternen, Schornstein mit Rauch, Leiter, Fundament folgt dem Gelände bis zum Seegrund), Turm, Brunnen, Laterne, Marktstand. Natur: 6 Holzarten in 3 Größen, Busch, Fels, Natur-Pinsel mit 6 Mischungen (nichts auf Wasser, Pflanzen nur auf Erde). Vorlagen-Import (.litematic, mehrere Regionen) mit Fassade im Abstand 1, Kern geschützt, Versionswarnung, Vorlagen nur lokal. Bauen-Leiste mit 3 Varianten (Vorschaubild, Stacks/Shulker, Aufwand), andere Variante würfeln, Palette am gesetzten Bauwerk wechseln, Gelände-Abtrag. 48 Tests.
 - 20.10.2026 (Fassung 4): Ablauf umgebaut. Karte: Bereich als Rechteck aufziehen (max. 512 × 512). 3D: ganzer Bereich in 32er-Stücken geladen (Höhe aus den Heightmaps, 6 Blöcke Untergrund), frei durchfliegen (WASD, Leertaste/Shift, Strg, Maus; Doppelklick fängt die Maus), dort Bauwerk wählen, Vorschau am Mauszeiger, Klick setzt, R dreht. Lasttest 501 × 501: 11 s mit Software-Grafik.
 - 20.10.2026: Etappe 1 (Durchstich) gebaut: Welt laden (Ordner/ZIP), Karte mit Kacheln und Markierungen, Testhaus platzieren/drehen/spiegeln/verschieben, 3D mit Gelände (einfarbig oder mit .jar-Texturen), Schicht-Anleitung mit Timeline und Materialliste, Export .litematic/.schem. Offen: Test mit Lukas' echter Welt und in Litematica.
 
@@ -48,4 +53,5 @@ Weltformat: ab 26.1 liegen die Regionen in `dimensions/minecraft/overworld/regio
 - Fassung 1 (20.10.2026): erster Durchstich. Rückmeldung: in der Artifact-Vorschau ließ sich der Weltordner nicht verbinden (Fehler).
 - Fassung 2 (20.10.2026): eingebettet (Artifact) Ordner über Dateiauswahl oder Hineinziehen, Export dort als .zip über den Speichern-Dialog der Plattform. Direkt geöffnet (Pages, lokal) bleibt die dauerhafte Ordner-Verbindung.
 - Fassung 3 (20.10.2026): .jar auch per Hineinziehen, Pfad-Hinweis. Rückmeldung: „warum noch ohne Farbe, wo ist die .jar?“ und Ablauf grundsätzlich ändern (siehe Zielkarte „Ablauf“). Form: Rechteck aufziehen, Bereiche bis ca. 500 × 500.
-- Fassung 4 (20.10.2026): neuer Ablauf Bereich → 3D-Flug → platzieren. Wartet auf Rückmeldung.
+- Fassung 4 (20.10.2026): neuer Ablauf Bereich → 3D-Flug → platzieren. Rückmeldung: „mach alles aus docs/inhalte.md“, meist Survival, keine Vorbilder.
+- Fassung 5 (20.10.2026): Paletten, Stile, Strukturen, Natur, Vorlagen, Varianten. Wartet auf Rückmeldung.

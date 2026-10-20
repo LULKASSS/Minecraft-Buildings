@@ -1,6 +1,8 @@
 # Was in den Basenplaner hineingehört
 
-Stand 20.10.2026, Entwurf zur Besprechung mit Lukas. Nichts davon ist gebaut.
+Stand 20.10.2026. Lukas: „alles machen“, meist Survival, manchmal Kreativ, keine Vorbilder.
+
+**Gebaut (Fassung 5):** Abschnitte 1–6 und 7 (drei Varianten mit Aufwand, Palette lernen). **Offen:** Wege als eigenes Werkzeug, Gelände formen (glätten, terrassieren), Mauer mit Tor, Brücke und Dorf (Etappe 4), eigene Paletten von Hand bearbeiten, echte Biomerkennung für Stil-Vorschläge.
 
 ## Worum es geht
 

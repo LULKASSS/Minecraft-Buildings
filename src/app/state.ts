@@ -4,7 +4,11 @@
 import type { Vec3 } from '../blueprint/blueprint'
 import { boundsOf, layersOf, overlaps, place, type Bounds, type Layer, type Placed, type Placement } from '../blueprint/placement'
 import type { Rotation } from '../blueprint/transform'
-import { buildFromSource } from '../catalog'
+import { buildFromSource, type Category } from '../catalog'
+import type { Size } from '../catalog/styles'
+import type { Mix, Species } from '../catalog/nature'
+import { setCustomPalettes, type Palette } from '../style/palettes'
+import type { BlueprintSource } from '../blueprint/blueprint'
 import type { WorldSession } from './world-session'
 import * as store from './store'
 
@@ -26,7 +30,24 @@ export interface Project {
   dataVersion: number
   areas: Area[]
   placements: Placement[]
+  /** gelernte Paletten */
+  palettes?: Palette[]
   updatedAt: number
+}
+
+/** Was im Bauen-Feld gerade gewählt ist. */
+export interface BuildChoice {
+  cat: Category
+  type: string
+  style: string
+  palette: string
+  size: Size
+  species: Species
+  mix: Mix
+  templateId: string | null
+  facade: boolean
+  seeds: number[]
+  pick: number
 }
 
 export type Selection = { kind: 'area' | 'placement'; id: string } | null
@@ -42,12 +63,35 @@ export interface State {
   openArea: string | null
   /** Bauwerk-Typ, der gerade in 3D an den Mauszeiger gehängt ist */
   placing: string | null
+  build: BuildChoice
   guide: { layer: number | null; single: boolean; playing: boolean; tab: 'layer' | 'all' }
   savedFolder: string | null
   textures: 'none' | 'loading' | 'ready'
 }
 
 export const DEMO_DATA_VERSION = 4786 // 26.1
+
+export function newSeeds(): number[] {
+  return [0, 1, 2].map(() => Math.floor(Math.random() * 1e6))
+}
+
+/** Name für ein neues Bauwerk aus der Auswahl, z. B. "Haus" oder "Kirsche". */
+export function placementLabel(b: BuildChoice = S.build): string {
+  if (b.cat === 'natur') return b.type === 'baum' ? SPECIES_LABEL[b.species] : b.type === 'pinsel' ? MIX_LABEL[b.mix] : b.type === 'busch' ? 'Busch' : 'Fels'
+  if (b.cat === 'vorlage') return 'Vorlage'
+  return ({ haus: 'Haus', turm: 'Turm', brunnen: 'Brunnen', marktstand: 'Marktstand', laterne: 'Laterne' } as Record<string, string>)[b.type] ?? b.type
+}
+const SPECIES_LABEL: Record<Species, string> = { oak: 'Eiche', birch: 'Birke', spruce: 'Fichte', cherry: 'Kirsche', dark_oak: 'Dunkeleiche', acacia: 'Akazie' }
+const MIX_LABEL: Record<Mix, string> = { wald: 'Laubwald', nadelwald: 'Nadelwald', kirschhain: 'Kirschhain', wiese: 'Blumenwiese', savanne: 'Savanne', felsen: 'Felsen' }
+
+/** Quelle für das, was im Bauen-Feld gewählt ist (Variante = Seed). */
+export function choiceSource(b: BuildChoice = S.build, seed = b.seeds[b.pick]): BlueprintSource {
+  const params: Record<string, unknown> =
+    b.cat === 'natur' ? { size: b.size, species: b.species, mix: b.mix }
+    : b.cat === 'vorlage' ? { templateId: b.templateId, ...(b.facade ? { facade: { palette: b.palette, sides: [true, true, true, true], roof: false } } : {}) }
+    : { style: b.style, palette: b.palette, size: b.size }
+  return { generator: b.type, version: 1, seed, params }
+}
 
 function emptyProject(worldKey = '', worldName = '', dataVersion = DEMO_DATA_VERSION): Project {
   return { worldKey, worldName, dataVersion, areas: [], placements: [], updatedAt: Date.now() }
@@ -62,6 +106,7 @@ export const S: State = {
   sel: null,
   openArea: null,
   placing: null,
+  build: { cat: 'gebaeude', type: 'haus', style: 'mittelalter', palette: 'mittel-eiche', size: 'M', species: 'oak', mix: 'wald', templateId: null, facade: false, seeds: newSeeds(), pick: 0 },
   guide: { layer: null, single: false, playing: false, tab: 'layer' },
   savedFolder: null,
   textures: 'none',
@@ -100,6 +145,7 @@ export function saveProject(): void {
 export async function loadProject(worldKey: string, worldName: string, dataVersion: number): Promise<void> {
   const p = await store.get<Project & { markers?: unknown }>('kv', `project:${worldKey}`)
   S.project = p ? { ...p, areas: p.areas ?? [], worldName, dataVersion } : emptyProject(worldKey, worldName, dataVersion)
+  setCustomPalettes(S.project.palettes ?? [])
   // Bauwerke aus Fassung 1/2 hingen an Punkten statt an Bereichen: ohne Bereich nicht mehr erreichbar
   S.project.placements = S.project.placements.filter(pl => pl.areaId && S.project.areas.some(a => a.id === pl.areaId))
   S.sel = null
@@ -207,13 +253,13 @@ export function deleteArea(id: string): void {
   update()
 }
 
-export function addPlacement(areaId: string, generator: string, pos: Vec3, rotation: Rotation): Placement {
-  const n = placementsIn(areaId).length + 1
+export function addPlacement(areaId: string, source: BlueprintSource, label: string, pos: Vec3, rotation: Rotation): Placement {
+  const n = placementsIn(areaId).filter(p => p.name.startsWith(label)).length + 1
   const p: Placement = {
     id: uid('p'),
-    name: n === 1 ? 'Bauwerk' : `Bauwerk ${n}`,
+    name: n === 1 ? label : `${label} ${n}`,
     areaId,
-    source: { generator, version: 1, seed: 0, params: {} },
+    source: JSON.parse(JSON.stringify(source)),
     pos,
     rotation,
     mirror: false,
@@ -244,6 +290,13 @@ export function nudgePlacement(id: string, d: Vec3): void {
   changePlacement(id, p => {
     p.pos = [p.pos[0] + d[0], p.pos[1] + d[1], p.pos[2] + d[2]]
   })
+}
+
+export function addPalette(p: Palette): void {
+  S.project.palettes = [...(S.project.palettes ?? []), p]
+  setCustomPalettes(S.project.palettes)
+  saveProject()
+  update()
 }
 
 export function renamePlacement(id: string, name: string): void {

@@ -1,6 +1,6 @@
 import './ui/styles.css'
 import type { Vec3 } from './blueprint/blueprint'
-import { loadProject, nudgePlacement, placedOf, rotatePlacement, S, selectedArea, selectedPlacement, subscribe, toast, update } from './app/state'
+import { addPalette, loadProject, nudgePlacement, placedOf, rotatePlacement, S, selectedArea, selectedPlacement, subscribe, toast, update } from './app/state'
 import { AreaView } from './app/area-view'
 import * as store from './app/store'
 import { WorldSession } from './app/world-session'
@@ -12,6 +12,9 @@ import { coord } from './ui/format'
 import { placeThumb, play, renderGuide, step, stop } from './ui/guide'
 import { I } from './ui/icons'
 import { renderSide, type SideActions } from './ui/side-panel'
+import { learnPalette } from './style/learn'
+import { importTemplate, loadTemplates, removeTemplate, versionName } from './app/templates-store'
+import { fallbackColor } from './render/block-colors'
 import { makeWorld } from './world/demo-world'
 import { filesFromDrop, FolderSource, UploadSource, ZipSource, type WorldSource } from './world/source'
 import { canConnectFolder, hostDownloads, inFrame } from './app/env'
@@ -231,6 +234,8 @@ const actions: SideActions = {
   startPlacing(type) {
     S.placing = type
     update()
+    // am Handy steht die 3D-Ansicht oben: dorthin zurück, damit man gleich ins Gelände tippen kann
+    if (window.innerWidth <= 700) $('stage').scrollIntoView({ behavior: 'smooth', block: 'start' })
   },
   cancelPlacing() {
     S.placing = null
@@ -250,6 +255,46 @@ const actions: SideActions = {
   focusPlacement(id) {
     view3d?.focusPlacement(id)
   },
+  learnPalette() {
+    if (!view3d) return
+    const area = S.project.areas.find(a => a.id === S.openArea)
+    const r = learnPalette(view3d.blockCounts(), S.build.style, `Aus ${area?.name ?? 'Bereich'}`)
+    if (!r) return toast('In diesem Bereich ist noch zu wenig gebaut, um eine Palette abzulesen.')
+    addPalette(r.palette)
+    S.build.palette = r.palette.id
+    const found = Object.entries(r.roles).map(([role, id]) => `${ROLE_LABEL[role] ?? role}: ${String(id).replace(/_/g, ' ')}`).join(', ')
+    toast(`Palette gelernt. ${found || 'Rest aus der ähnlichsten fertigen Palette.'}`)
+    update()
+  },
+  async importTemplate() {
+    const [f] = await pickFile('.litematic')
+    if (!f) return
+    try {
+      const t = await importTemplate(f)
+      S.build.templateId = t.id
+      const warn = t.dataVersion !== S.project.dataVersion ? ` Getestet mit ${versionName(t.dataVersion)}, deine Welt ist ${versionName(S.project.dataVersion)}: im Spiel prüfen, ob sie noch läuft.` : ''
+      toast(`Vorlage „${t.name}“ geladen.${warn}`, !!warn)
+    } catch (e) {
+      toast(String((e as Error).message ?? e), true)
+    }
+    update()
+  },
+  async removeTemplate(id) {
+    await removeTemplate(id)
+    if (S.build.templateId === id) S.build.templateId = null
+    update()
+  },
+  terrainCut(id) {
+    return view3d?.terrainCut(id) ?? 0
+  },
+  textured() {
+    return texturesCache?.mesher ?? null
+  },
+  blockColor(id) {
+    const name = id.includes(':') ? id : `minecraft:${id}`
+    return texturesCache?.mapColors[name] ?? fallbackColor(name)
+  },
+  versionName,
 }
 
 let texturesCache: Awaited<ReturnType<typeof loadTextures>> | null = null
@@ -298,6 +343,8 @@ async function saveFile(filename: string, bytes: Uint8Array): Promise<'file' | '
   }
 }
 
+const ROLE_LABEL: Record<string, string> = { sockel: 'Sockel', wall: 'Wand', frame: 'Balken', roof: 'Dach', trim: 'Kante', floor: 'Boden', window: 'Fenster', door: 'Tür', detail: 'Holz', light: 'Licht', accent: 'Stoff' }
+
 // ---------- 3D ----------
 
 let view3d: AreaView | null = null
@@ -314,6 +361,12 @@ function ensureView(): AreaView {
       progress.hidden = done >= total
       progress.innerHTML = `<span>Gelände ${Math.round((done / Math.max(1, total)) * 100)} %</span><i style="width:${(done / Math.max(1, total)) * 100}%"></i>`
     }
+    const home = document.createElement('button')
+    home.className = 'btn map-draw'
+    home.innerHTML = `${I.target}Übersicht`
+    home.title = 'Kamera zurück über den Bereich'
+    home.addEventListener('click', () => view3d?.overview())
+    $('three').appendChild(home)
     view3d.onAimText = html => {
       if (S.view === '3d') $('readout').innerHTML = html
     }
@@ -433,6 +486,7 @@ window.addEventListener('keydown', e => {
 // ---------- Start ----------
 
 void (async () => {
+  await loadTemplates()
   const handle = await store.get<FileSystemDirectoryHandle>('kv', 'folder')
   if (handle) S.savedFolder = handle.name
   update()

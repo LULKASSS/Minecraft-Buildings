@@ -80,7 +80,7 @@ async function run(theme, width, height) {
   await shot('05-geflogen')
 
   // Platzieren: Typ wählen, ins Gelände unterhalb der Mitte zielen, klicken
-  await page.click('[data-type="test-house"]')
+  await page.click('[data-act="start-place"]')
   const box = await page.locator('#three canvas').boundingBox()
   await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.62)
   await page.waitForTimeout(400)
@@ -166,8 +166,86 @@ async function last() {
   host.close()
 }
 
+
+// Galerie: je Stil Varianten-Bilder und ein gesetztes Haus in 3D (mit .jar, wenn angegeben)
+async function galerie() {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: 'light', deviceScaleFactor: 2, acceptDownloads: true })
+  page.on('pageerror', e => fail(`galerie: ${e.message}`))
+  await page.goto(`http://localhost:${PORT}/?demo`)
+  await page.waitForSelector('.world-name', { timeout: 8000 })
+  await page.waitForTimeout(1000)
+  if (process.env.JAR) {
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-act="textures"]')])
+    await chooser.setFiles(process.env.JAR)
+    await page.waitForFunction(() => document.body.textContent.includes('Texturen aus deiner .jar'), null, { timeout: 60000 })
+  }
+  await aufziehen(page, page, -70, -60, 140, 110)
+  await page.click('[data-act="open-area"]')
+  await warteAufGelaende(page)
+  const styles = ['mittelalter', 'japan', 'modern', 'wueste', 'steampunk']
+  for (const [i, st] of styles.entries()) {
+    await page.click(`[data-style="${st}"]`)
+    await page.waitForTimeout(600)
+    await page.locator('#side').screenshot({ path: `${OUT}g-${i + 1}-${st}-auswahl.png` })
+    await page.locator('.vars').screenshot({ path: `${OUT}g-${i + 1}-${st}-varianten.png`, scale: 'device' })
+    await page.click('#three .map-draw')
+    await page.waitForTimeout(300)
+    await page.click('[data-act="start-place"]')
+    const box = await page.locator('#three canvas').boundingBox()
+    const px = box.x + box.width * [0.3, 0.45, 0.6, 0.38, 0.55][i], py = box.y + box.height * [0.55, 0.62, 0.55, 0.72, 0.7][i]
+    await page.mouse.move(px, py)
+    await page.waitForTimeout(300)
+    await page.mouse.click(px, py)
+    await page.waitForSelector('#guide:not([hidden])', { timeout: 5000 })
+    await page.waitForTimeout(500)
+    const id = await page.locator('.item[aria-current="true"][data-placement]').getAttribute('data-placement')
+    await page.locator(`[data-placement="${id}"]`).click()
+    await page.waitForTimeout(700)
+    await page.locator('#three').screenshot({ path: `${OUT}g-${i + 1}-${st}-3d.png` })
+  }
+  // Natur
+  await page.click('[data-cat="natur"]')
+  await page.waitForTimeout(500)
+  await page.locator('#side').screenshot({ path: `${OUT}g-6-natur-auswahl.png` })
+  await page.click('[data-btype="pinsel"]')
+  await page.waitForTimeout(500)
+  await page.click('#three .map-draw')
+  await page.waitForTimeout(300)
+  await page.click('[data-act="start-place"]')
+  const box = await page.locator('#three canvas').boundingBox()
+  await page.mouse.move(box.x + box.width * 0.75, box.y + box.height * 0.7)
+  await page.waitForTimeout(300)
+  await page.mouse.click(box.x + box.width * 0.75, box.y + box.height * 0.7)
+  await page.waitForTimeout(800)
+  await page.locator('#three').screenshot({ path: `${OUT}g-7-natur-3d.png` })
+
+  // Vorlage: das gesetzte Haus als .litematic exportieren und als "Farm" wieder einlesen (Rundweg Export → Import)
+  await page.locator('[data-placement]').first().click()
+  await page.waitForTimeout(300)
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-act="litematic"]')])
+  await dl.saveAs(`${OUT}probe-farm.litematic`)
+  await page.click('[data-cat="vorlage"]')
+  const [ch] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-act="import-template"]')])
+  await ch.setFiles(`${OUT}probe-farm.litematic`)
+  await page.waitForSelector('[data-template]', { timeout: 5000 })
+  await page.click('[data-act="toggle-facade"]')
+  await page.waitForTimeout(300)
+  await page.locator('#side').screenshot({ path: `${OUT}g-8-vorlage-auswahl.png` })
+  await page.click('#three .map-draw')
+  await page.waitForTimeout(300)
+  await page.click('[data-act="start-place"]')
+  await page.mouse.move(box.x + box.width * 0.45, box.y + box.height * 0.75)
+  await page.waitForTimeout(300)
+  await page.mouse.click(box.x + box.width * 0.45, box.y + box.height * 0.75)
+  await page.waitForSelector('#guide:not([hidden])', { timeout: 5000 })
+  await page.waitForTimeout(600)
+  await page.locator('#three').screenshot({ path: `${OUT}g-9-vorlage-3d.png` })
+  await page.close()
+}
+
 try {
-  if (process.env.NUR_LAST) await last()
+  if (process.env.NUR_GALERIE) await galerie()
+  else if (process.env.NUR_LAST) await last()
   else {
     await eingebettet()
     await run('light', 1440, 900)

@@ -298,3 +298,33 @@ button { cursor: pointer; }
 }
 .progress i { display: block; height: 3px; margin-top: 6px; border-radius: 2px; background: var(--accent); transition: width .3s var(--ease); }
 #stage.placing #three canvas { cursor: copy; }
+
+/* ---------- Bauen: Reiter, Chips, Paletten, Varianten ---------- */
+.seg.wide { display: flex; width: 100%; margin-bottom: 12px; }
+.seg.wide .seg-btn { flex: 1; padding: 0 8px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.sub { margin: 14px 0 8px; font-size: 12.5px; font-weight: 500; color: var(--fg-3); }
+.sub.row { display: flex; align-items: center; }
+.pals { display: flex; flex-direction: column; gap: 4px; }
+.pal {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--surface); text-align: left;
+  transition: border-color .2s var(--ease), background .2s var(--ease), transform .12s var(--ease);
+}
+.pal:hover { border-color: var(--line-2); }
+.pal:active { transform: scale(.98); }
+.pal[aria-pressed="true"] { border-color: var(--accent-line); background: var(--accent-soft); }
+.pal-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pal-name em { font-style: normal; font-size: 11.5px; color: var(--accent-ink); margin-left: 4px; }
+.sw { display: flex; gap: 3px; }
+.sw i { width: 12px; height: 18px; border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.1); }
+.linkish.small { font-size: 12.5px; padding: 6px 0 0; }
+.vars { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.var {
+  display: flex; flex-direction: column; gap: 4px; padding: 4px; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--surface); text-align: left; transition: border-color .2s var(--ease), transform .12s var(--ease);
+}
+.var:active { transform: scale(.97); }
+.var[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.var img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 8px; display: block; }
+.var span { font-size: 11px; line-height: 1.3; color: var(--fg-2); padding: 0 2px 2px; }
