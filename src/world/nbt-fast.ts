@@ -9,7 +9,7 @@ export interface NbtObject {
 
 const SKIP_DEFAULT = new Set([
   'block_entities', 'structures', 'PostProcessing', 'blending_data', 'block_ticks', 'fluid_ticks',
-  'Lights', 'CarvingMasks', 'Entities', 'entities', 'BlockLight', 'SkyLight', 'UpgradeData',
+  'Lights', 'CarvingMasks', 'Entities', 'entities', 'BlockLight', 'SkyLight', 'UpgradeData', 'biomes',
 ])
 
 const decoder = new TextDecoder()

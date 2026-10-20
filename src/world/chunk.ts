@@ -6,7 +6,10 @@ import { readNbt, unpackAligned, type NbtObject } from './nbt-fast'
 
 export interface Section {
   palette: BlockState[]
-  data: Uint16Array | null // null: alles palette[0]
+  data: Uint16Array | null // null: alles palette[0] (oder noch gepackt, siehe raw)
+  /** noch gepackte Indizes; werden beim ersten Zugriff entpackt */
+  raw?: Int32Array
+  bits?: number
 }
 
 export interface ChunkData {
@@ -18,6 +21,8 @@ export interface ChunkData {
   /** WORLD_SURFACE: Y über dem obersten Nicht-Luft-Block je Spalte (x + z*16), aus der Heightmap oder berechnet. */
   surface: Int16Array
   dataVersion: number
+  /** Wie lange Spieler insgesamt in diesem Chunk waren, in Sekunden (aus InhabitedTime) */
+  inhabited: number
 }
 
 export type ChunkResult = { ok: true; chunk: ChunkData } | { ok: false; reason: 'legacy' | 'incomplete' }
@@ -50,12 +55,12 @@ export function decodeChunk(bytes: Uint8Array): ChunkResult {
       return formatState(String(e.Name), props)
     })
     if (pal.length === 0) continue
-    let data: Uint16Array | null = null
+    const sec: Section = { palette: pal, data: null }
     if (pal.length > 1 && bs.data instanceof Int32Array) {
-      const bits = Math.max(4, Math.ceil(Math.log2(pal.length)))
-      data = unpackAligned(bs.data, bits, 4096)
+      sec.raw = bs.data
+      sec.bits = Math.max(4, Math.ceil(Math.log2(pal.length)))
     }
-    sections[Number(s.Y) - minSec] = { palette: pal, data }
+    sections[Number(s.Y) - minSec] = sec
   }
 
   const chunk: ChunkData = {
@@ -66,6 +71,7 @@ export function decodeChunk(bytes: Uint8Array): ChunkResult {
     sections,
     surface: new Int16Array(256).fill(NO_SURFACE),
     dataVersion: Number(root.DataVersion ?? 0),
+    inhabited: Number(root.InhabitedTime ?? 0) / 20,
   }
 
   const hm = (root.Heightmaps as NbtObject | undefined)?.WORLD_SURFACE
@@ -96,6 +102,10 @@ export function blockAt(c: ChunkData, x: number, y: number, z: number): BlockSta
   const si = (y - c.minY) >> 4
   const s = c.sections[si]
   if (!s) return AIR
+  if (s.raw) {
+    s.data = unpackAligned(s.raw, s.bits!, 4096)
+    s.raw = undefined
+  }
   if (!s.data) return s.palette[0]
   return s.palette[s.data[((y & 15) << 8) | (z << 4) | x]] ?? AIR
 }

@@ -67,6 +67,8 @@ export interface State {
   guide: { layer: number | null; single: boolean; playing: boolean; tab: 'layer' | 'all' }
   savedFolder: string | null
   textures: 'none' | 'loading' | 'ready'
+  /** Spuren auf der Karte: wo ihr wart und gebaut habt */
+  traces: boolean
 }
 
 export const DEMO_DATA_VERSION = 4786 // 26.1
@@ -110,6 +112,7 @@ export const S: State = {
   guide: { layer: null, single: false, playing: false, tab: 'layer' },
   savedFolder: null,
   textures: 'none',
+  traces: true,
 }
 
 type Listener = (s: State) => void

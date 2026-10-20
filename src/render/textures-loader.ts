@@ -24,6 +24,8 @@ interface Base {
 let base: Base | null = null
 
 export interface LoadedTextures {
+  /** woran der Kachel-Speicher die Farben erkennt (Dateiname + Größe) */
+  id: string
   count: number
   mesher: TexturedMesher
   mapColors: Record<string, RGB>
@@ -52,10 +54,10 @@ export async function loadTextures(file: File): Promise<LoadedTextures> {
   await reader.close()
   if (defs.length >= 100) base = next
 
-  return build(next)
+  return { ...(await build(next)), id: `tex:${file.name}:${file.size}` }
 }
 
-async function build(src: Base): Promise<LoadedTextures> {
+async function build(src: Base): Promise<Omit<LoadedTextures, 'id'>> {
   const white = await new Promise<Blob>(r => {
     const c = document.createElement('canvas')
     c.width = c.height = 16

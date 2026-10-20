@@ -5,7 +5,8 @@ import { blockAt, decodeChunk } from '../src/world/chunk'
 import { openWorld, parseLevel } from '../src/world/level'
 import { readChunkBytes, readHeader } from '../src/world/region'
 import { findWorldRoot, UploadSource, ZipSource, type WorldSource } from '../src/world/source'
-import { renderTile, TILE } from '../src/world/tile'
+import { renderTile, TILE, TRACE } from '../src/world/tile'
+import { findHotspots } from '../src/world/traces'
 import { makeWorld, testBlock, WATER_LEVEL } from '../src/world/demo-world'
 
 const world = makeWorld()
@@ -138,5 +139,24 @@ describe('Gelände-Ausschnitt ohne feste Höhe', () => {
     expect(a.box.y0).toBe(lo - UNDERGROUND)
     expect(a.box.y1).toBe(hi)
     expect(areaGet(a, 5, hi, 5) ?? 'minecraft:air').toBe(testBlock(5, hi, 5))
+  })
+})
+
+describe('Spuren', () => {
+  it('kennt Spielzeit und gebaute Spalten je Chunk und findet den Platz', async () => {
+    const t = await renderTile(regionBlob('r.0.0.mca'), 0, 0)
+    // Platz x/z 100…110 liegt in Chunk 6,6
+    expect(t.built[6 + 6 * 32]).toBeGreaterThan(80)
+    expect(t.built[0]).toBe(0) // Gras, Sand, Wasser, Bäume zählen nicht
+    expect(t.inhabited[6 + 6 * 32] / 3600).toBeGreaterThan(20)
+    const spots = findHotspots([{ rx: 0, rz: 0, inhabited: t.inhabited, built: t.built }])
+    expect(spots[0].hours).toBeGreaterThan(20)
+    expect(Math.abs(spots[0].x - 105)).toBeLessThan(8)
+    expect(Math.abs(spots[0].z - 105)).toBeLessThan(8)
+    // der Spawn liegt näher als 192 Blöcke: kein zweiter Ort
+    expect(spots).toHaveLength(1)
+    // Spuren-Ebene: Platz kräftig, Rest höchstens zart
+    const o = ((105 >> 2) + (105 >> 2) * TRACE) * 4
+    expect(t.trace[o + 3]).toBe(230)
   })
 })

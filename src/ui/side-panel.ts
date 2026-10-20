@@ -18,6 +18,7 @@ import { coord, esc, num } from '../ui/format'
 import { I } from './icons'
 import { placeThumb } from './guide'
 import { canConnectFolder } from '../app/env'
+import { duration } from '../map/map-view'
 
 export interface SideActions {
   connectFolder(): void
@@ -35,6 +36,7 @@ export interface SideActions {
   cancelPlacing(): void
   toggleTheme(): void
   focusArea(id: string): void
+  focusPoint(x: number, z: number): void
   focusPlacement(id: string): void
   learnPalette(): void
   importTemplate(): void
@@ -49,7 +51,7 @@ export function renderSide(el: HTMLElement, a: SideActions): void {
   // Während getippt wird, nicht neu zeichnen (sonst springt der Cursor)
   if (el.contains(document.activeElement) && document.activeElement?.tagName === 'INPUT') return
   const scroll = el.querySelector('.side-scroll')?.scrollTop ?? 0
-  const body = !S.session ? '' : S.view === '3d' && openArea() ? buildBlocks(openArea()!, a) : areaBlocks()
+  const body = !S.session ? '' : S.view === '3d' && openArea() ? buildBlocks(openArea()!, a) : areaBlocks() + traceBlock()
   el.innerHTML = `
     <div class="side-scroll">
       ${worldBlock()}
@@ -97,11 +99,38 @@ function worldBlock(): string {
       <div class="status-line" style="margin-top:4px">
         <span class="dot ${busy ? 'busy' : 'on'}"></span>${busy ? esc(busy) : `${esc(s.info.versionName || 'Version ?')} · ${num(s.info.regions.length)} Regionen${s.demo ? ' · Testwelt' : ''}`}
       </div>
+      ${mapProgress()}
       <div class="row" style="margin-top:12px">
         <span class="small muted grow">${S.textures === 'ready' ? 'Texturen aus deiner .jar' : S.textures === 'loading' ? 'Texturen werden gelesen …' : 'Einfarbig'}</span>
         ${S.textures !== 'ready' ? `<button class="btn small" data-act="textures" ${S.textures === 'loading' ? 'disabled' : ''}>.jar wählen</button>` : ''}
       </div>
       ${S.textures === 'none' ? `<p class="note muted" style="margin:6px 0 0">Texturen aus <b>minecraft/versions/${esc(versionGuess())}/${esc(versionGuess())}.jar</b>, oder die Datei auf die Karte ziehen.</p>` : ''}
+    </div>`
+}
+
+function mapProgress(): string {
+  const p = S.session!.progress()
+  if (p.done >= p.total) return ''
+  return `<div class="progress" title="Die Karte lädt erst, was du siehst, danach den Rest für die Spuren">
+    <div class="progress-bar"><span style="width:${Math.round((p.done / p.total) * 100)}%"></span></div>
+    <span class="small muted">Karte ${num(p.done)} / ${num(p.total)} Regionen</span></div>`
+}
+
+/** Spuren: wo ihr am meisten wart und gebaut habt. */
+function traceBlock(): string {
+  const s = S.session!
+  const spots = S.traces ? s.hotspots() : []
+  const p = s.progress()
+  const items = spots.map((h, i) => `<button class="item" data-spot="${h.x},${h.z}">
+      <span class="pin-num">${i + 1}</span><span class="grow"><span class="item-name" style="display:block">X ${coord(h.x)} · Z ${coord(h.z)}</span>
+      <span class="item-sub">${duration(h.hours * 3600)} in der Nähe${h.built ? ` · ${num(h.built)} gebaute Stellen` : ''}</span></span></button>`).join('')
+  return `
+    <div class="block">
+      <div class="block-head"><span class="block-title">Spuren</span>
+        <button class="btn ghost small" data-act="traces" aria-pressed="${S.traces}">${S.traces ? 'Ausblenden' : 'Zeigen'}</button></div>
+      ${!S.traces ? `<p class="note muted" style="margin:0">Zeigt auf der Karte, wo ihr wart und wo gebaut ist.</p>`
+        : items ? `<div class="list">${items}</div><p class="note muted" style="margin:8px 0 0">Kräftig: oben liegt Gebautes (Dörfer zählen mit). Zart: dort wart ihr, je länger, desto dichter.</p>`
+        : `<p class="note muted" style="margin:0">${p.done < p.total ? 'Wird beim Laden der Karte gesammelt …' : 'Noch keine Orte mit viel Spielzeit gefunden.'}</p>`}
     </div>`
 }
 
@@ -317,6 +346,10 @@ function bind(el: HTMLElement, a: SideActions): void {
       case 'textures': return a.loadTextures()
       case 'theme': return a.toggleTheme()
       case 'draw': return a.drawArea()
+      case 'traces':
+        S.traces = !S.traces
+        try { localStorage.setItem('traces', S.traces ? '1' : '0') } catch { /* egal */ }
+        return update()
       case 'open-area': return ar && a.openArea(ar.id)
       case 'del-area': return ar && deleteArea(ar.id)
       case 'cancel-place': return a.cancelPlacing()
@@ -347,6 +380,10 @@ function bind(el: HTMLElement, a: SideActions): void {
       case 'rotR': return p && rotatePlacement(p.id, 1)
       case 'mirror': return p && changePlacement(p.id, q => (q.mirror = !q.mirror))
     }
+  }))
+  el.querySelectorAll<HTMLElement>('[data-spot]').forEach(b => b.addEventListener('click', () => {
+    const [x, z] = b.dataset.spot!.split(',').map(Number)
+    a.focusPoint(x, z)
   }))
   const choose = (attr: string, fn: (v: string) => void) =>
     el.querySelectorAll<HTMLElement>(`[${attr}]`).forEach(x => x.addEventListener('click', () => {

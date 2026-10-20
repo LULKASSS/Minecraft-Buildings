@@ -220,7 +220,9 @@ export class MapView {
     }
     const { x, z } = this.hover
     const y = S.session?.surfaceAt(x, z)
-    this.readout.innerHTML = `X <b>${x}</b> · Z <b>${z}</b>${y != null ? ` · Y <b>${y}</b>` : ''}`
+    const c = S.traces ? S.session?.chunkAt(x, z) : null
+    const here = c && c.secs >= 60 ? ` · <span class="muted">${duration(c.secs)} hier</span>` : ''
+    this.readout.innerHTML = `X <b>${x}</b> · Z <b>${z}</b>${y != null ? ` · Y <b>${y}</b>` : ''}${here}`
   }
 
   private draw(): void {
@@ -235,22 +237,42 @@ export class MapView {
     if (!s) return
 
     const tl = this.toWorld(0, 0), br = this.toWorld(W, H)
+    const rx0 = Math.floor(tl.x / TILE), rx1 = Math.floor(br.x / TILE), rz0 = Math.floor(tl.z / TILE), rz1 = Math.floor(br.z / TILE)
+    s.setView(this.cx, this.cz, rx0, rz0, rx1, rz1)
     ctx.imageSmoothingEnabled = this.zoom < 1
     let loading = false
-    for (let rz = Math.floor(tl.z / TILE); rz <= Math.floor(br.z / TILE); rz++)
-      for (let rx = Math.floor(tl.x / TILE); rx <= Math.floor(br.x / TILE); rx++) {
-        if (!s.hasRegion(rx, rz)) continue
+    const size = TILE * this.zoom
+    for (let rz = rz0; rz <= rz1; rz++)
+      for (let rx = rx0; rx <= rx1; rx++) {
         const t = s.tile(rx, rz)
+        if (!t) continue
         const p = this.toScreen(rx * TILE, rz * TILE)
-        const size = TILE * this.zoom
-        if (t?.bitmap) ctx.drawImage(t.bitmap, p.sx, p.sy, size, size)
+        if (t.bitmap) ctx.drawImage(t.bitmap, p.sx, p.sy, size, size)
         else {
           ctx.fillStyle = this.colors.surface2
           ctx.fillRect(p.sx, p.sy, size, size)
-          loading = true
+          if (t.state === 'error') this.hatch(p.sx, p.sy, size, size, this.colors.gap)
         }
+        if (t.state === 'loading' || t.state === 'idle' || t.stale || t.restoring) loading = true
       }
     this.host.classList.toggle('is-loading', loading)
+
+    // Spuren: wo ihr wart (zart) und wo oben Gebautes liegt (kräftig)
+    if (S.traces) {
+      ctx.imageSmoothingEnabled = false
+      for (let rz = rz0; rz <= rz1; rz++)
+        for (let rx = rx0; rx <= rx1; rx++) {
+          const t = s.tiles.get(`${rx},${rz}`)
+          if (!t?.trace) continue
+          const p = this.toScreen(rx * TILE, rz * TILE)
+          ctx.drawImage(t.trace, p.sx, p.sy, size, size)
+        }
+      s.hotspots().forEach((h, i) => {
+        const p = this.toScreen(h.x, h.z)
+        if (p.sx < -40 || p.sy < -40 || p.sx > W + 40 || p.sy > H + 40) return
+        this.pin(p.sx, p.sy, String(i + 1))
+      })
+    }
 
     // Chunk-Raster beim Reinzoomen
     if (this.zoom >= 3) {
@@ -326,6 +348,24 @@ export class MapView {
     }
   }
 
+  /** Nummerierte Stecknadel für einen Ort aus „Hier wart ihr am meisten“. */
+  private pin(x: number, y: number, text: string): void {
+    const ctx = this.ctx
+    ctx.beginPath()
+    ctx.arc(x, y, 11, 0, Math.PI * 2)
+    ctx.fillStyle = this.colors.accent
+    ctx.fill()
+    ctx.lineWidth = 2
+    ctx.strokeStyle = this.colors.surface
+    ctx.stroke()
+    ctx.fillStyle = this.colors.surface
+    ctx.font = '600 12px Geist, system-ui, sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(text, x, y + 0.5)
+    ctx.textAlign = 'start'
+  }
+
   private label(text: string, x: number, y: number, strong: boolean): void {
     const ctx = this.ctx
     ctx.font = `${strong ? 600 : 500} 12px Geist, system-ui, sans-serif`
@@ -358,6 +398,14 @@ export class MapView {
     ctx.stroke()
     ctx.restore()
   }
+}
+
+/** Spielzeit lesbar: „40 Min.“, „3 Std.“, „120 Std.“ */
+export function duration(secs: number): string {
+  const m = secs / 60
+  if (m < 60) return `${Math.round(m)} Min.`
+  const h = m / 60
+  return `${h < 10 ? h.toFixed(1).replace('.', ',') : Math.round(h)} Std.`
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {

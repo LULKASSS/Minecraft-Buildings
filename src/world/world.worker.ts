@@ -3,7 +3,7 @@
 import type { RGB } from '../render/block-colors'
 import { fallbackColor } from '../render/block-colors'
 import { readArea, type Box3 } from './area'
-import { renderTile, TILE } from './tile'
+import { renderTile, TILE, TRACE } from './tile'
 
 export type WorkerRequest =
   | { id: number; type: 'tile'; blob: Blob; rx: number; rz: number; colors?: Record<string, RGB>; mcc?: Record<string, Blob> }
@@ -22,9 +22,16 @@ self.onmessage = async (ev: MessageEvent<WorkerRequest>) => {
       canvas.getContext('2d')!.putImageData(new ImageData(t.rgba as Uint8ClampedArray<ArrayBuffer>, TILE, TILE), 0, 0)
       const png = await canvas.convertToBlob({ type: 'image/png' })
       const bitmap = canvas.transferToImageBitmap()
+      const tc = new OffscreenCanvas(TRACE, TRACE)
+      tc.getContext('2d')!.putImageData(new ImageData(t.trace as Uint8ClampedArray<ArrayBuffer>, TRACE, TRACE), 0, 0)
+      const tracePng = await tc.convertToBlob({ type: 'image/png' })
+      const trace = tc.transferToImageBitmap()
       ;(self as unknown as Worker).postMessage(
-        { id: req.id, ok: true, result: { bitmap, png, heights: t.heights, chunks: t.chunks, skipped: t.skipped } },
-        [bitmap, t.heights.buffer],
+        {
+          id: req.id, ok: true,
+          result: { bitmap, png, trace, tracePng, heights: t.heights, inhabited: t.inhabited, built: t.built, chunks: t.chunks, skipped: t.skipped },
+        },
+        [bitmap, trace, t.heights.buffer, t.inhabited.buffer, t.built.buffer],
       )
     } else {
       const regions = req.regions.map(r => ({ rx: r.rx, rz: r.rz, blob: r.blob, external: ext(r.mcc) }))

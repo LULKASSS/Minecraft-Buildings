@@ -1,7 +1,7 @@
 // Erzeugt eine kleine Testwelt im 26.x-Format: Hügel, ein See, Sand am Ufer.
 // Für Tests und zum Ausprobieren ohne eigene Welt. Keine echte Welt im Repo.
 
-import { NbtCompound, NbtFile, NbtInt, NbtIntArray, NbtList, NbtLongArray, NbtString } from 'deepslate/nbt'
+import { NbtCompound, NbtFile, NbtInt, NbtIntArray, NbtList, NbtLong, NbtLongArray, NbtString } from 'deepslate/nbt'
 import { deflate } from 'pako'
 
 const MIN_SEC = -4
@@ -16,10 +16,24 @@ export function terrainHeight(x: number, z: number): number {
 /** Bäume auf trockenem Gras, fest verteilt, damit es in 3D etwas zu sehen gibt. */
 function treeAt(x: number, z: number): boolean {
   const h = Math.imul(x * 73856093 ^ z * 19349663, 2654435761) >>> 0
-  return h % 89 === 0 && terrainHeight(x, z) > WATER_LEVEL + 1
+  return h % 89 === 0 && terrainHeight(x, z) > WATER_LEVEL + 1 && !inPlaza(x, z)
 }
 
 const TRUNK = 5
+
+/** Gepflasterter Platz in der Testwelt, damit die Spuren etwas Gebautes finden. */
+export function inPlaza(x: number, z: number): boolean {
+  return x >= 100 && x <= 110 && z >= 100 && z <= 110
+}
+
+/** Spielzeit je Chunk in Ticks: viel am Platz, etwas am Spawn. */
+export function demoInhabited(cx: number, cz: number): number {
+  const at = (px: number, pz: number, hours: number, r: number) => {
+    const d = Math.hypot(cx - px, cz - pz)
+    return d > r ? 0 : hours * (1 - d / (r + 1))
+  }
+  return Math.round((at(6.5, 6.5, 30, 4) + at(0.5, 0.5, 2, 3)) * 3600 * 20)
+}
 
 export function testBlock(x: number, y: number, z: number): string {
   const h = terrainHeight(x, z)
@@ -37,6 +51,7 @@ export function testBlock(x: number, y: number, z: number): string {
   if (y < -60) return 'minecraft:bedrock'
   if (y < h - 3) return 'minecraft:stone'
   if (y < h) return h <= WATER_LEVEL + 1 ? 'minecraft:sand' : 'minecraft:dirt'
+  if (y === h && inPlaza(x, z) && h > WATER_LEVEL + 1) return 'minecraft:cobblestone'
   if (y === h) return h <= WATER_LEVEL + 1 ? 'minecraft:sand' : 'minecraft:grass_block[snowy=false]'
   if (y <= WATER_LEVEL) return 'minecraft:water[level=0]'
   return 'minecraft:air'
@@ -99,6 +114,7 @@ export function makeChunk(cx: number, cz: number, block = testBlock, dataVersion
     .set('zPos', new NbtInt(cz))
     .set('yPos', new NbtInt(MIN_SEC))
     .set('Status', new NbtString('minecraft:full'))
+    .set('InhabitedTime', new NbtLong(BigInt(demoInhabited(cx, cz))))
     .set('sections', new NbtList(sections, 10))
     .set('Heightmaps', new NbtCompound().set('WORLD_SURFACE', new NbtLongArray(packAligned(surface, 9))))
     .set('block_entities', new NbtList([], 10))

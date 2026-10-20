@@ -328,3 +328,9 @@ button { cursor: pointer; }
 .var[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .var img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 8px; display: block; }
 .var span { font-size: 11px; line-height: 1.3; color: var(--fg-2); padding: 0 2px 2px; }
+
+/* Spuren und Lade-Fortschritt der Karte */
+.pin-num { width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 600; display: grid; place-items: center; flex: none; }
+.progress { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.progress-bar { height: 4px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
+.progress-bar span { display: block; height: 100%; background: var(--accent); transition: width .3s ease; }

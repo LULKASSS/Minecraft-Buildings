@@ -35,6 +35,7 @@ function applyTheme(): void {
 try {
   const t = localStorage.getItem('theme')
   if (t === 'light' || t === 'dark') S.theme = t
+  if (localStorage.getItem('traces') === '0') S.traces = false
 } catch { /* privat */ }
 
 // ---------- Ansichten ----------
@@ -110,12 +111,18 @@ async function openSession(src: WorldSource, demo = false): Promise<void> {
     const session = await WorldSession.open(src, demo)
     S.session?.dispose()
     S.session = session
+    const told = new Set<string>()
     session.onTile = t => {
       map.invalidate()
-      if (t.state === 'error') toast(`Region ${t.rx}, ${t.rz}: ${t.error}`, true)
-      else if (t.error) toast(t.error)
+      // jede Meldung nur einmal, sonst stapeln sich beim Hintergrund-Laden die Hinweise
+      const msg = t.state === 'error' ? `Region ${t.rx}, ${t.rz}: ${t.error}` : t.error
+      if (msg && !told.has(msg)) {
+        told.add(msg)
+        toast(msg, t.state === 'error')
+      }
     }
-    if (texturesCache) session.setColors(texturesCache.mapColors)
+    session.onProgress = () => update()
+    if (texturesCache) session.setColors(texturesCache.mapColors, texturesCache.id)
     await loadProject(session.key, session.info.name, session.info.dataVersion)
     view3d?.close()
     S.view = 'map'
@@ -201,7 +208,7 @@ const actions: SideActions = {
     try {
       texturesCache = await loadTextures(f)
       S.textures = 'ready'
-      S.session?.setColors(texturesCache.mapColors)
+      S.session?.setColors(texturesCache.mapColors, texturesCache.id)
       view3d?.setTextures(texturesCache.mesher)
       map.invalidate()
       toast(`${texturesCache.count} Texturen geladen.`)
@@ -251,6 +258,10 @@ const actions: SideActions = {
   focusArea(id) {
     const a = S.project.areas.find(a => a.id === id)
     if (a && S.view === 'map') map.focus((a.x0 + a.x1 + 1) / 2, (a.z0 + a.z1 + 1) / 2)
+  },
+  focusPoint(x, z) {
+    if (S.view !== 'map') setView('map')
+    map.focus(x, z, Math.max(map.zoom, 2))
   },
   focusPlacement(id) {
     view3d?.focusPlacement(id)
