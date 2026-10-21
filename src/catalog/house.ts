@@ -5,7 +5,7 @@
 // y = 0 ist die Höhe des Geländeblocks am Anker; der Sockel folgt dem Gelände nach unten.
 
 import type { Blueprint, BlueprintSource } from '../blueprint/blueprint'
-import { Builder, choose, groundAt, randInt, rng, type Facing, type Ground } from '../style/builder'
+import { Builder, choose, groundAt, isSoil, randInt, rng, type Facing, type Ground } from '../style/builder'
 import { getPalette, type Role } from '../style/palettes'
 import { styleById, type HouseForm, type RoofKind, type Size, type Style } from './styles'
 
@@ -31,6 +31,8 @@ interface Vol {
   roof: VolRoof
   ridge: 'x' | 'z'
   jetty: boolean
+  /** Vorkragung auch an den Seiten (rundum) */
+  jettyAll?: boolean
   dir?: Facing
 }
 
@@ -45,6 +47,10 @@ interface Plan {
   cz: number
   door: { x: number; z: number }
   chimney: boolean
+  /** steiles Dach: zwei Stufen je Schritt */
+  steep: boolean
+  /** Erdgeschoss aus Stein (Sockel-Material) */
+  stoneBase: boolean
   r: () => number
 }
 
@@ -62,7 +68,11 @@ function plan(source: BlueprintSource): Plan {
   const [w, d] = choose(r, st.sizes[p.size])
   const storeys = choose(r, st.storeys[p.size])
   const roof: RoofKind = st.roof === 'gable' && r() < st.hipChance ? 'hip' : st.roof
-  const main: Vol = { kind: 'main', x0: 0, z0: 0, w, d, storeys, roof, ridge: d >= w ? 'z' : 'x', jetty: st.jetty && storeys >= 2 && r() < 0.65 }
+  const jetty = st.jetty && storeys >= 2 && r() < 0.65
+  const main: Vol = { kind: 'main', x0: 0, z0: 0, w, d, storeys, roof, ridge: d >= w ? 'z' : 'x', jetty, jettyAll: jetty && r() < st.jettyAllChance }
+  // steil nur bei schmalen Häusern, sonst erschlägt das Dach den Bau
+  const steep = roof === 'gable' && Math.min(w, d) <= 9 && r() < st.steepChance
+  const stoneBase = storeys >= 2 && r() < st.stoneBaseChance
   const vols: Vol[] = [main]
   const side: Facing = r() < 0.5 ? 'east' : 'west'
   // Nebendächer: Satteldach bleibt Satteldach (Zwerchgiebel), sonst wie der Hauptbau
@@ -112,6 +122,7 @@ function plan(source: BlueprintSource): Plan {
     form, vols, main, sk: st.sockel, sh: st.storey, ov: st.overhang, cx, cz,
     door: bay ? { x: cx, z: bay.z0 + bay.d - 1 } : { x: cx, z: d - 1 },
     chimney: st.chimneys > 0 && r() > 0.25,
+    steep, stoneBase,
     r,
   }
 }
@@ -121,8 +132,9 @@ export function houseGroundExtent(source: BlueprintSource): { x0: number; z0: nu
   const pl = plan(source)
   let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity
   for (const v of pl.vols) {
-    x0 = Math.min(x0, v.x0); z0 = Math.min(z0, v.z0 - (v.jetty ? 1 : 0))
-    x1 = Math.max(x1, v.x0 + v.w - 1); z1 = Math.max(z1, v.z0 + v.d - 1 + (v.jetty ? 1 : 0))
+    const jx = v.jettyAll ? 1 : 0, jz = v.jetty ? 1 : 0
+    x0 = Math.min(x0, v.x0 - jx); z0 = Math.min(z0, v.z0 - jz)
+    x1 = Math.max(x1, v.x0 + v.w - 1 + jx); z1 = Math.max(z1, v.z0 + v.d - 1 + jz)
   }
   return { x0: x0 - 3 - pl.cx, z0: z0 - 3 - pl.cz, x1: x1 + 3 - pl.cx, z1: z1 + 6 - pl.cz }
 }
@@ -146,13 +158,14 @@ export function buildHouse(source: BlueprintSource): Blueprint {
   const inVol = (v: Vol, k: number, x: number, z: number) => {
     if (k < 0 || k >= v.storeys) return false
     const j = v.jetty && k >= 1 ? 1 : 0
-    return x >= v.x0 && x < v.x0 + v.w && z >= v.z0 - j && z < v.z0 + v.d + j
+    const jx = v.jettyAll && k >= 1 ? 1 : 0
+    return x >= v.x0 - jx && x < v.x0 + v.w + jx && z >= v.z0 - j && z < v.z0 + v.d + j
   }
   const inF = (k: number, x: number, z: number) => vols.some(v => inVol(v, k, x, z))
   let bx0 = Infinity, bz0 = Infinity, bx1 = -Infinity, bz1 = -Infinity
   for (const v of vols) {
-    bx0 = Math.min(bx0, v.x0); bz0 = Math.min(bz0, v.z0 - 1)
-    bx1 = Math.max(bx1, v.x0 + v.w - 1); bz1 = Math.max(bz1, v.z0 + v.d)
+    bx0 = Math.min(bx0, v.x0 - 1); bz0 = Math.min(bz0, v.z0 - 1)
+    bx1 = Math.max(bx1, v.x0 + v.w); bz1 = Math.max(bz1, v.z0 + v.d)
   }
   const cells = (k: number): [number, number][] => {
     const out: [number, number][] = []
@@ -236,7 +249,7 @@ export function buildHouse(source: BlueprintSource): Blueprint {
       const isPil = pillar.has(`${k},${x},${z}`)
       for (let y = fl(k) + 1; y < fl(k) + sh; y++) {
         if (isPil && (timber || st.frame === 'band')) b.beam(x, y, z, 'frame', 'y')
-        else b.role(x, y, z, 'wall', {}, sk + 1)
+        else b.role(x, y, z, k === 0 && pl.stoneBase ? 'sockel' : 'wall', {}, sk + 1)
       }
     }
     // Balkenlage über dem Stockwerk, Decke bzw. Boden darüber
@@ -256,8 +269,10 @@ export function buildHouse(source: BlueprintSource): Blueprint {
     if (k >= 1)
       for (const [x, z] of F) {
         if (inF(k - 1, x, z)) continue
-        const f = !inF(k, x, z + 1) ? 'south' : !inF(k, x, z - 1) ? 'north' : null
-        b.beam(x, fl(k), z, 'frame', 'x')
+        const f = DIRS.find(([, dx, dz]) => !inF(k, x + dx, z + dz))?.[0] ?? null
+        // Schwelle: bei Stein-Erdgeschoss ein Steinband wie im Vorbild, sonst Balken
+        if (pl.stoneBase) b.role(x, fl(k), z, 'sockel', {}, 0)
+        else b.beam(x, fl(k), z, 'frame', f === 'east' || f === 'west' ? 'z' : 'x')
         if (f && pillar.has(`${k},${x},${z}`)) b.form(x, fl(k) - 1, z, 'trim', 'stairs', { facing: BACK[f], half: 'top' })
       }
   }
@@ -328,16 +343,17 @@ export function buildHouse(source: BlueprintSource): Blueprint {
     if (surface) roofTop.set(`${x},${z}`, Math.max(t ?? -999, y))
     return true
   }
-  const ridgeY = (v: Vol) => top(v) + (v.roof === 'spire' ? v.w * 2 : v.roof === 'flat' || v.roof === 'parapet' ? 1 : Math.ceil(Math.min(v.w, v.d) / 2) + ov)
+  const ridgeY = (v: Vol) => top(v) + (v.roof === 'spire' ? v.w * 2 : v.roof === 'flat' || v.roof === 'parapet' ? 1 : (Math.ceil(Math.min(v.w, v.d) / 2) + ov) * (pl.steep && v.roof === 'gable' ? 2 : 1))
   const order = [...vols].sort((a, c) => ridgeY(c) - ridgeY(a) || (a.kind === 'main' ? -1 : 1))
   for (const v of order) {
     const R = top(v)
     const j = v.jetty && v.storeys >= 2 ? 1 : 0
-    const fx0 = v.x0, fz0 = v.z0 - j, fw = v.w, fd = v.d + 2 * j
+    const jx = v.jettyAll && v.storeys >= 2 ? 1 : 0
+    const fx0 = v.x0 - jx, fz0 = v.z0 - j, fw = v.w + 2 * jx, fd = v.d + 2 * j
     // Flügel laufen ins Hauptdach hinein (Kehle), statt mit einer Giebelwand davor zu enden
     const ext: [number, number] = v.kind === 'main' ? [0, 0] : extendToward(v, main)
     switch (v.roof) {
-      case 'gable': gableRoof(b, st, v, fx0, fz0, fw, fd, R, ov, ext, put, v.kind === 'main'); break
+      case 'gable': gableRoof(b, st, v, fx0, fz0, fw, fd, R, ov, ext, put, v.kind === 'main', pl.steep); break
       case 'hip': hipRoof(b, v, fx0, fz0, fw, fd, R, ov, false, put); break
       case 'pagoda':
         hipRoof(b, v, fx0, fz0, fw, fd, R, Math.max(2, ov), true, put)
@@ -348,6 +364,20 @@ export function buildHouse(source: BlueprintSource): Blueprint {
       default:
         flatRoof(b, st, v, fx0, fz0, fw, fd, R, ov, put, vols, inVol, top)
         if (v.kind === 'tower' && v.roof === 'parapet') domeRoof(b, v, fx0, fz0, fw, R, put)
+    }
+  }
+
+  // ---------- Laternen an Ketten unter den Dachecken ----------
+  if (st.chainLanterns && (main.roof === 'gable' || main.roof === 'hip' || main.roof === 'pagoda')) {
+    const jx = main.jettyAll && main.storeys >= 2 ? 1 : 0, jz = main.jetty && main.storeys >= 2 ? 1 : 0
+    const o = main.roof === 'pagoda' ? Math.max(2, ov) : ov
+    for (const [x, z] of [[main.x0 - jx - o, main.z0 - jz - o], [main.x0 + main.w - 1 + jx + o, main.z0 - jz - o], [main.x0 - jx - o, main.z0 + main.d - 1 + jz + o], [main.x0 + main.w - 1 + jx + o, main.z0 + main.d - 1 + jz + o]]) {
+      // unter der Dachkante: erste belegte Zelle von oben suchen
+      let yTop: number | null = null
+      for (let y = top(main) + 4; y >= top(main) - 2; y--) if (b.has(x, y, z)) { yTop = y; break }
+      if (yTop === null || b.has(x, yTop - 1, z) || b.has(x, yTop - 2, z)) continue
+      b.set(x, yTop - 1, z, 'minecraft:iron_chain[axis=y]')
+      b.set(x, yTop - 2, z, `${b.main('light')}[hanging=true]`)
     }
   }
 
@@ -406,19 +436,25 @@ export function buildHouse(source: BlueprintSource): Blueprint {
 
   // ---------- Garten vor dem Haus ----------
   const front = cells(0).filter(([x, z]) => outside(x, z + 1))
+  // Blumen brauchen Erde; ohne Geländedaten (Vorschau) wird angenommen, dass Gras da ist
+  const isSoilAt = (x: number, z: number) => !g?.soil || isSoil(g, x - cx, z - cz)
   for (const [x, z] of front) {
     const bz = z + 1
     if (Math.abs(x - door.x) <= 2 + (doubleDoor ? 1 : 0) || b.has(x, gnd(x, bz) + 1, bz) || b.has(x, 0, bz)) continue
     const y = gnd(x, bz) + 1
     const n = b.noise(x, 0, bz, 21)
     switch (st.garden) {
-      case 'hedge':
-        b.soft(x, y, bz, n < 0.3 ? 'minecraft:flowering_azalea_leaves[persistent=true]' : 'minecraft:oak_leaves[persistent=true]')
-        if (n > 0.75) {
-          b.soft(x, y + 1, bz, 'minecraft:rose_bush[half=lower]')
-          b.soft(x, y + 2, bz, 'minecraft:rose_bush[half=upper]')
-        }
+      case 'hedge': {
+        // Busch, darauf oder daneben hohe Blumen (Rosen, Pfingstrosen, Flieder) wie im Vorbild
+        const tall = ['rose_bush', 'peony', 'lilac'][Math.floor(b.noise(x, 3, bz, 23) * 3)]
+        if (n < 0.45) b.soft(x, y, bz, n < 0.2 ? 'minecraft:flowering_azalea_leaves[persistent=true]' : 'minecraft:oak_leaves[persistent=true]')
+        else if (isSoilAt(x, bz)) {
+          b.soft(x, y, bz, `minecraft:${tall}[half=lower]`)
+          b.soft(x, y + 1, bz, `minecraft:${tall}[half=upper]`)
+        } else b.soft(x, y, bz, 'minecraft:oak_leaves[persistent=true]')
+        if (n > 0.92) b.soft(x, y, bz + 1, 'minecraft:hay_block[axis=y]')
         break
+      }
       case 'gravel':
         b.set(x, y - 1, bz, 'minecraft:gravel')
         if (n < 0.2) b.soft(x, y, bz, 'minecraft:azalea_leaves[persistent=true]')
@@ -529,7 +565,7 @@ type Put = (self: Vol, x: number, y: number, z: number, place: () => void, surfa
 
 // ---------- Dächer ----------
 
-function gableRoof(b: Builder, st: Style, v: Vol, fx0: number, fz0: number, fw: number, fd: number, R: number, ov: number, ext: [number, number], put: Put, isMain: boolean): void {
+function gableRoof(b: Builder, st: Style, v: Vol, fx0: number, fz0: number, fw: number, fd: number, R: number, ov: number, ext: [number, number], put: Put, isMain: boolean, steep: boolean): void {
   const alongZ = v.ridge === 'z'
   const U = alongZ ? fw : fd, V = alongZ ? fd : fw
   const u0 = alongZ ? fx0 : fz0, v0 = alongZ ? fz0 : fx0
@@ -537,19 +573,26 @@ function gableRoof(b: Builder, st: Style, v: Vol, fx0: number, fz0: number, fw: 
   const up: Facing = alongZ ? 'east' : 'south'
   const down: Facing = alongZ ? 'west' : 'north'
   const vLo = -1 - ext[0], vHi = V + ext[1]
+  // steil: je Schritt nach innen zwei Stufen übereinander (wie im Vorbild „55 Tricks“)
+  const rise = steep ? 2 : 1
   for (let i = 0; ; i++) {
     const left = -ov + i, right = U - 1 + ov - i
-    const y = R - ov + 1 + i
+    const y = R - ov + 1 + i * rise
     if (left > right) break
     for (let vv = vLo; vv <= vHi; vv++) {
       // Kantenholz an Traufe nur beim Hauptdach; Nebendächer bleiben im Dachmaterial, sonst wirkt die Kehle unruhig
       const edge = (i === 0 && isMain) || (vv === -1 && ext[0] === 0) || (vv === V && ext[1] === 0)
       const role: Role = edge ? 'trim' : 'roof'
       const [lx, lz] = xz(left, vv), [rx, rz] = xz(right, vv)
-      if (left === right) put(v, lx, y, lz, () => b.form(lx, y, lz, 'trim', 'slab', { type: 'bottom' }))
-      else {
-        put(v, lx, y, lz, () => b.form(lx, y, lz, role, 'stairs', { facing: up, half: 'bottom' }))
-        put(v, rx, y, rz, () => b.form(rx, y, rz, role, 'stairs', { facing: down, half: 'bottom' }))
+      for (let s = 0; s < rise; s++) {
+        const yy = y + s
+        if (left === right) {
+          if (s === rise - 1) put(v, lx, yy, lz, () => b.form(lx, yy, lz, 'trim', 'slab', { type: 'bottom' }))
+          else put(v, lx, yy, lz, () => b.role(lx, yy, lz, 'trim'))
+        } else {
+          put(v, lx, yy, lz, () => b.form(lx, yy, lz, role, 'stairs', { facing: up, half: 'bottom' }))
+          put(v, rx, yy, rz, () => b.form(rx, yy, rz, role, 'stairs', { facing: down, half: 'bottom' }))
+        }
       }
       // Untersicht unter dem Überstand: umgedrehte Stufen
       if (i === 0 && st.soffit && isMain && vv >= 0 && vv < V) {
@@ -558,17 +601,19 @@ function gableRoof(b: Builder, st: Style, v: Vol, fx0: number, fz0: number, fw: 
       }
     }
     // Giebelwände unter den Dachflächen (nur an freien Enden)
-    if (y > R) {
+    for (let s = 0; s < rise; s++) {
+      const yy = y + s
+      if (yy <= R) continue
       const ends = [...(ext[0] === 0 ? [0] : []), ...(ext[1] === 0 ? [V - 1] : [])]
       for (let u = Math.max(0, left + 1); u <= Math.min(U - 1, right - 1); u++)
         for (const vv of ends) {
           const [x, z] = xz(u, vv)
           const center = u === Math.floor((U - 1) / 2)
-          const gableWindow = center && y === R + 2 && right - left >= 5
-          put(v, x, y, z, () => {
-            if (gableWindow) b.role(x, y, z, 'window')
-            else if (st.frame === 'timber' && (u === 0 || u === U - 1 || center)) b.role(x, y, z, 'frame', { axis: 'y' })
-            else b.role(x, y, z, 'wall')
+          const gableWindow = center && (yy === R + 2 || (steep && yy === R + 3)) && right - left >= 5
+          put(v, x, yy, z, () => {
+            if (gableWindow) b.role(x, yy, z, 'window')
+            else if (st.frame === 'timber' && (u === 0 || u === U - 1 || center)) b.role(x, yy, z, 'frame', { axis: 'y' })
+            else b.role(x, yy, z, 'wall')
           }, false)
         }
     }

@@ -50,6 +50,12 @@ export interface Style {
   /** Vorbau am Eingang und Garten davor */
   porch: 'canopy' | 'veranda' | 'slab' | 'awning'
   garden: 'hedge' | 'gravel' | 'planter' | 'pots' | 'yard'
+  /** Anteil steiler Dächer (doppelte Stufen), rundum vorkragender Obergeschosse und Erdgeschosse aus Stein */
+  steepChance: number
+  jettyAllChance: number
+  stoneBaseChance: number
+  /** Laternen an Ketten unter den Dachecken */
+  chainLanterns: boolean
   /** Untersicht unter dem Dachüberstand, Balkenköpfe, Efeu */
   soffit: boolean
   beamEnds: boolean
@@ -61,9 +67,10 @@ export const STYLES: Style[] = [
     id: 'mittelalter', label: 'Mittelalterlich', storey: 4, sockel: 1, frame: 'timber', spacing: 4, roof: 'gable', overhang: 1,
     window: { h: 1, wide: false, shutters: true, boxes: true, awning: false, glassBlock: false },
     sizes: { S: [[7, 9], [7, 7]], M: [[9, 11], [9, 13]], L: [[11, 15], [13, 15]] },
-    storeys: { S: [1], M: [1, 2], L: [2] }, chimneys: 1, skirt: true, veranda: false, vigas: false, doubleDoor: false,
+    storeys: { S: [1, 2], M: [2], L: [2, 3] }, chimneys: 1, skirt: true, veranda: false, vigas: false, doubleDoor: false,
     palettes: ['mittel-putz', 'mittel-eiche', 'mittel-ziegel', 'mittel-fichte', 'mittel-dunkel'], nature: 'wald',
     forms: ['rechteck', 'winkel', 'zwerchgiebel', 'turm', 'anbau', 'doppel'], jetty: true, hipChance: 0.15, towerRoof: 'spire', porch: 'canopy', garden: 'hedge', soffit: true, beamEnds: true, ivy: true,
+    steepChance: 0.55, jettyAllChance: 0.5, stoneBaseChance: 0.5, chainLanterns: true,
   },
   {
     id: 'japan', label: 'Japanisch', storey: 4, sockel: 2, frame: 'posts', spacing: 3, roof: 'pagoda', overhang: 2,
@@ -72,6 +79,7 @@ export const STYLES: Style[] = [
     storeys: { S: [1], M: [1, 2], L: [2] }, chimneys: 0, skirt: true, veranda: true, vigas: false, doubleDoor: true,
     palettes: ['japan-kirsche', 'japan-bambus', 'japan-dunkel'], nature: 'kirschhain',
     forms: ['rechteck', 'winkel', 'zwerchgiebel', 'turm', 'anbau'], jetty: false, hipChance: 0, towerRoof: 'pagoda', porch: 'veranda', garden: 'gravel', soffit: false, beamEnds: false, ivy: false,
+    steepChance: 0, jettyAllChance: 0, stoneBaseChance: 0, chainLanterns: true,
   },
   {
     id: 'modern', label: 'Modern', storey: 4, sockel: 1, frame: 'band', spacing: 4, roof: 'flat', overhang: 1,
@@ -80,6 +88,7 @@ export const STYLES: Style[] = [
     storeys: { S: [1], M: [2], L: [2, 3] }, chimneys: 0, skirt: false, veranda: false, vigas: false, doubleDoor: false,
     palettes: ['modern-weiss', 'modern-beton', 'modern-tuff', 'modern-quarz'], nature: 'wiese',
     forms: ['rechteck', 'winkel', 'turm', 'anbau', 'doppel'], jetty: false, hipChance: 0, towerRoof: 'flat', porch: 'slab', garden: 'planter', soffit: false, beamEnds: false, ivy: false,
+    steepChance: 0, jettyAllChance: 0, stoneBaseChance: 0, chainLanterns: false,
   },
   {
     id: 'wueste', label: 'Wüste', storey: 4, sockel: 1, frame: 'none', spacing: 3, roof: 'parapet', overhang: 0,
@@ -88,6 +97,7 @@ export const STYLES: Style[] = [
     storeys: { S: [1], M: [1, 2], L: [2] }, chimneys: 0, skirt: false, veranda: false, vigas: true, doubleDoor: false,
     palettes: ['wueste-sand', 'wueste-weiss', 'wueste-lehm', 'wueste-rot'], nature: 'savanne',
     forms: ['rechteck', 'winkel', 'turm', 'anbau', 'doppel'], jetty: false, hipChance: 0, towerRoof: 'parapet', porch: 'awning', garden: 'pots', soffit: false, beamEnds: false, ivy: false,
+    steepChance: 0, jettyAllChance: 0, stoneBaseChance: 0, chainLanterns: false,
   },
   {
     id: 'steampunk', label: 'Steampunk', storey: 5, sockel: 2, frame: 'timber', spacing: 4, roof: 'gable', overhang: 1,
@@ -96,6 +106,7 @@ export const STYLES: Style[] = [
     storeys: { S: [1], M: [2], L: [2, 3] }, chimneys: 2, skirt: true, veranda: false, vigas: false, doubleDoor: false,
     palettes: ['steam-kupfer', 'steam-gruen', 'steam-schwarz'], nature: 'felsen',
     forms: ['rechteck', 'winkel', 'zwerchgiebel', 'turm', 'anbau', 'doppel'], jetty: true, hipChance: 0.25, towerRoof: 'spire', porch: 'canopy', garden: 'yard', soffit: true, beamEnds: true, ivy: false,
+    steepChance: 0.45, jettyAllChance: 0.4, stoneBaseChance: 0.6, chainLanterns: true,
   },
 ]
 
