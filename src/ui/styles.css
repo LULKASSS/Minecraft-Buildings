@@ -12,7 +12,7 @@
   --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --r: 20px; --r-s: 12px; --ease: cubic-bezier(.22,1,.36,1);
   --spring: linear(0, .039, .134, .258, .393, .524, .644, .748, .833, .901, .952, .989, 1.013, 1.028, 1.036, 1.038, 1.037, 1.034, 1.029, 1.024, 1.019, 1.014, 1.01, 1.007, 1.004, 1.002, 1.001, 1);
-  --stage: #ECECF1; --map-empty: #E9E9EE; --map-grid: rgba(12,12,20,.05);
+  --stage: #ECECF1; --sky: #ECECF1; --map-empty: #E9E9EE; --map-grid: rgba(12,12,20,.05);
   --panel-w: 340px; --gut: 16px; --mini-w: 260px;
 }
 @media (prefers-color-scheme: dark) {
@@ -25,7 +25,7 @@
     --gap: #F2555A; --gap-soft: rgba(242,85,90,.15); --ok: #3DB67A; --ok-soft: rgba(61,182,122,.14);
     --gap-ink: #F2555A; --ok-ink: #3DB67A;
     --shadow: 0 0 0 1px rgba(255,255,255,.045), 0 1px 2px rgba(0,0,0,.3), 0 10px 30px -8px rgba(0,0,0,.5);
-    --stage: #0E0E11; --map-empty: #111114; --map-grid: rgba(255,255,255,.04);
+    --stage: #0E0E11; --sky: #2C2A35; --map-empty: #111114; --map-grid: rgba(255,255,255,.04);
   }
 }
 :root[data-theme="dark"] {
@@ -37,7 +37,7 @@
   --gap: #F2555A; --gap-soft: rgba(242,85,90,.15); --ok: #3DB67A; --ok-soft: rgba(61,182,122,.14);
   --gap-ink: #F2555A; --ok-ink: #3DB67A;
   --shadow: 0 0 0 1px rgba(255,255,255,.045), 0 1px 2px rgba(0,0,0,.3), 0 10px 30px -8px rgba(0,0,0,.5);
-  --stage: #0E0E11; --map-empty: #111114; --map-grid: rgba(255,255,255,.04);
+  --stage: #0E0E11; --sky: #2C2A35; --map-empty: #111114; --map-grid: rgba(255,255,255,.04);
 }
 
 /* ---------- Grundlagen ---------- */

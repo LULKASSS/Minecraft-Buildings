@@ -94,10 +94,12 @@ export class WorldView {
     const cam = S.project.camera
     const sp = session.info.spawn
     const y = (x: number, z: number) => session.surfaceAt(x, z) ?? 70
-    this.start = cam ? [cam.x, cam.y, cam.z] : sp ? [sp[0], y(sp[0], sp[2]), sp[2]] : [0, 70, 0]
+    // gemerkte Höhe nicht blind übernehmen: sie kann aus einer Fassung mit falschen Höhen stammen
+    this.start = cam ? [cam.x, y(cam.x, cam.z), cam.z] : sp ? [sp[0], y(sp[0], sp[2]), sp[2]] : [0, 70, 0]
+    this.groundCheck = true
     this.userMoved = !!cam
     this.rebase(this.start[0], this.start[2])
-    this.scene.jumpTo(this.start[0], this.start[1], this.start[2], cam?.dist ?? 140)
+    this.scene.jumpTo(this.start[0], this.start[1], this.start[2], Math.max(40, cam?.dist ?? 140))
     this.sync()
     this.tick()
   }
@@ -113,13 +115,33 @@ export class WorldView {
   /** Zur Stelle springen, an der die Welt geöffnet wurde. */
   home(): void {
     this.scene.jumpTo(this.start[0], this.start[1], this.start[2], 140)
+    this.groundCheck = true
   }
 
   /** Irgendwohin springen (Minikarte, Orte mit viel Spielzeit). */
   jumpTo(x: number, z: number, dist = 120): void {
     this.userMoved = true
-    const y = this.session?.surfaceAt(x, z) ?? this.terrainTop(x, z) ?? this.scene.focusWorld()[1]
+    const y = this.terrainTop(x, z) ?? this.session?.surfaceAt(x, z) ?? this.scene.focusWorld()[1]
     this.scene.jumpTo(x, y, z, dist)
+    this.groundCheck = true
+  }
+
+  /** Nach dem Öffnen oder Springen: Drehpunkt auf das tatsächlich geladene Gelände setzen. */
+  private groundCheck = false
+
+  private fitToGround(): void {
+    if (this.scene.mode !== 'orbit') return
+    const [fx, fy, fz] = this.scene.focusWorld()
+    if (this.groundCheck) {
+      const t = this.terrainTop(Math.floor(fx), Math.floor(fz))
+      if (t === null) return
+      this.groundCheck = false
+      if (Math.abs(t + 1 - fy) > 2) this.scene.lift(t + 1 - fy)
+    }
+    // die Kamera nie unter dem Gelände: von unten sieht man nichts (Flächen zeigen nach oben)
+    const [cx, cy, cz] = this.scene.cameraWorld()
+    const below = this.terrainTop(cx, cz)
+    if (below !== null && cy < below + 2) this.scene.lift(below + 3 - cy)
   }
 
   /** Einmal automatisch zur Base, sobald die Spuren sie gefunden haben – nur, wenn man selbst noch nicht unterwegs war. */
@@ -209,8 +231,9 @@ export class WorldView {
     }
 
     this.updateLods(fx, fz)
+    this.fitToGround()
     this.onProgress(this.inFlight + want.length)
-    if (this.scene.mode === 'orbit') rememberCamera({ x: fx, y: fy, z: fz, dist })
+    if (this.scene.mode === 'orbit' && !this.groundCheck) rememberCamera({ x: fx, y: fy, z: fz, dist })
   }
 
   private async loadPiece(x0: number, z0: number): Promise<void> {

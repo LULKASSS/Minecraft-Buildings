@@ -280,6 +280,15 @@ export class Scene3D {
     this.onMove()
   }
 
+  /** Kamera und Drehpunkt gemeinsam anheben/absenken (an das echte Gelände anpassen). */
+  lift(dy: number): void {
+    this.camera.position.y += dy
+    this.orbit.target.y += dy
+    this.orbit.update()
+    this.needsRender = true
+    this.needsAim = true
+  }
+
   /** Punkt, um den sich gerade alles dreht (Welt); im Flug die Kamera selbst. */
   focusWorld(): Vec3 {
     const p = this.mode === 'orbit' ? this.orbit.target : this.camera.position
@@ -331,7 +340,8 @@ export class Scene3D {
 
   applyTheme(): void {
     const cs = getComputedStyle(document.documentElement)
-    const sky = new THREE.Color(cs.getPropertyValue('--stage').trim() || '#ececf1')
+    // eigener Himmel-Ton: im Dunkelmodus war der Himmel fast schwarz, ohne geladenes Gelände sah die 3D-Ansicht kaputt aus
+    const sky = new THREE.Color(cs.getPropertyValue('--sky').trim() || '#ececf1')
     const accent = new THREE.Color(cs.getPropertyValue('--accent').trim() || '#7f5fe8')
     this.scene.background = sky
     this.scene.fog = new THREE.Fog(sky, 220, 900)
