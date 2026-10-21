@@ -18,7 +18,7 @@ import { importTemplate, loadTemplates, removeTemplate, versionName } from './ap
 import { fallbackColor } from './render/block-colors'
 import { makeWorld } from './world/demo-world'
 import { ZipSource, type WorldSource } from './world/source'
-import { dirFromEntry, dirFromFiles, dirFromHandle, DirSource, pickJar, scanFolder, type Dir, type Scan, type WorldEntry } from './world/minecraft'
+import { dirFromEntry, dirFromFiles, dirFromHandle, DirSource, jarCandidates, scanFolder, type Dir, type Scan, type WorldEntry } from './world/minecraft'
 import { canConnectFolder, hostDownloads, inFrame } from './app/env'
 import { isTyping } from './render/fly'
 import { esc } from './ui/format'
@@ -130,12 +130,17 @@ async function openSession(src: WorldSource, demo = false): Promise<void> {
   }
 }
 
-/** Texturen ohne Zutun: .jar aus versions/, sonst eine früher von Mojang geladene. */
+/**
+ * Texturen ohne Zutun: .jar aus dem gewählten Ordner (mehrere Kandidaten, leere Loader-Hüllen werden übersprungen),
+ * sonst eine früher von Mojang geladene, sonst jetzt von Mojang laden. Niemand soll suchen müssen, wo seine .jar liegt.
+ */
 async function autoTextures(version: string): Promise<void> {
-  const local = scan ? pickJar(scan.versions, version) : null
-  if (local?.jar) return useJar(local.jar, `versions/${local.version}/${local.version}.jar`)
+  for (const v of (scan ? jarCandidates(scan.versions, version) : []).slice(0, 4)) {
+    if (await useJar(v.jar!, scan!.kind === 'modrinth' ? `Modrinth (${v.version})` : `versions/${v.version}/${v.version}.jar`, true)) return
+  }
   const cached = version ? await cachedJar(version) : null
-  if (cached) return useJar(cached, `Minecraft ${version} (von Mojang, gespeichert)`)
+  if (cached && (await useJar(cached, `Minecraft ${version} (gespeichert)`, true))) return
+  await actions.mojangTextures()
 }
 
 async function openFolder(root: Dir, kind: WorldSource['kind'], lastWorld?: string | null): Promise<void> {
@@ -233,7 +238,8 @@ const start = {
   },
 }
 
-async function useJar(f: File, from: string): Promise<void> {
+/** .jar laden; leise = Fehler nicht melden (beim automatischen Durchprobieren). Liefert, ob es geklappt hat. */
+async function useJar(f: File, from: string, quiet = false): Promise<boolean> {
   S.textures = 'loading'
   S.texturesFrom = 'Texturen werden gelesen …'
   update()
@@ -244,12 +250,15 @@ async function useJar(f: File, from: string): Promise<void> {
     S.session?.setColors(texturesCache.mapColors, texturesCache.id)
     view3d.setTextures(texturesCache.mesher)
     mini.invalidate()
+    update()
+    return true
   } catch (e) {
     S.textures = 'none'
     S.texturesFrom = null
-    toast(String((e as Error).message ?? e), true)
+    if (!quiet) toast(String((e as Error).message ?? e), true)
+    update()
+    return false
   }
-  update()
 }
 
 const actions: SideActions = {
@@ -281,7 +290,7 @@ const actions: SideActions = {
     } catch (e) {
       S.textures = 'none'
       S.texturesFrom = null
-      toast(`Mojang nicht erreichbar (${(e as Error).message}). Alternativ die .jar wählen.`, true)
+      toast(`Texturen konnten nicht von Mojang geladen werden (${(e as Error).message}). In der eingebetteten Vorschau kann das gesperrt sein – dann die App direkt öffnen oder die .jar wählen.`, true)
       update()
     }
   },
@@ -492,7 +501,7 @@ function renderStart(): void {
       ${picker ? `<button class="btn ${S.savedFolder ? '' : 'primary'}" data-s="connect">${I.folder}Minecraft-Ordner freigeben</button>` : ''}
       <button class="btn ${picker ? '' : 'primary'}" data-s="choose">${I.folder}${picker ? 'Ordner auswählen' : 'Minecraft-Ordner auswählen'}</button>
     </div>
-    <p class="note muted">${isMac ? 'Im Auswahlfenster <b>⇧⌘G</b> drücken, <b>~/Library/Application Support/minecraft</b> eingeben, „Hochladen“ bestätigen (es wird nichts hochgeladen, Chrome nennt das nur so). Oder den Ordner aus dem Finder hierher ziehen.' : 'Unter Windows: <b>%appdata%\\.minecraft</b>. Oder den Ordner hierher ziehen.'}</p>
+    <p class="note muted">${isMac ? 'Im Auswahlfenster <b>⇧⌘G</b> drücken, <b>~/Library/Application Support/minecraft</b> eingeben, „Hochladen“ bestätigen (es wird nichts hochgeladen, Chrome nennt das nur so). Oder den Ordner aus dem Finder hierher ziehen. Mit der Modrinth App: deren Ordner wählen (der mit „profiles“ und „meta“, meist ~/Library/Application Support/ModrinthApp).' : 'Unter Windows: <b>%appdata%\\.minecraft</b>. Oder den Ordner hierher ziehen.'}</p>
     <div class="row start-more"><button class="linkish small" data-s="zip">Welt als ZIP</button><button class="linkish small" data-s="demo">Mit Testwelt ausprobieren</button></div>
   </div>`
   el.querySelectorAll<HTMLElement>('[data-s]').forEach(b => b.addEventListener('click', () => void start[b.dataset.s as keyof typeof start]()))

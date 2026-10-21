@@ -83,7 +83,8 @@ function stateTag(s: string): NbtCompound {
 }
 
 /** secs: nur diese Abschnitte schreiben (für große Testwelten, die schnell entstehen sollen) */
-export function makeChunk(cx: number, cz: number, block = testBlock, dataVersion = 4786, secs: [number, number] = [MIN_SEC, MIN_SEC + SECTIONS - 1]): Uint8Array {
+/** hmShift: Heightmap absichtlich verschieben (wie in alten, übernommenen Chunks), um das Gegenprüfen zu testen */
+export function makeChunk(cx: number, cz: number, block = testBlock, dataVersion = 4786, secs: [number, number] = [MIN_SEC, MIN_SEC + SECTIONS - 1], hmShift = 0): Uint8Array {
   const sections: NbtCompound[] = []
   const surface: number[] = []
   for (let z = 0; z < 16; z++)
@@ -92,7 +93,7 @@ export function makeChunk(cx: number, cz: number, block = testBlock, dataVersion
       for (let y = (secs[1] + 1) * 16 - 1; y >= secs[0] * 16; y--) {
         if (block(cx * 16 + x, y, cz * 16 + z) !== 'minecraft:air') { top = y; break }
       }
-      surface.push(top + 1 - MIN_SEC * 16)
+      surface.push(Math.max(0, top + 1 - MIN_SEC * 16 + hmShift))
     }
   for (let sy = secs[0]; sy <= secs[1]; sy++) {
     const palette: string[] = []
@@ -166,14 +167,14 @@ export function makeLevelDat(name = 'Testwelt', dataVersion = 4786, lastPlayed =
 }
 
 /** Große Testwelt für Ladeproben: n × n volle Regionen ab 0,0, nur Abschnitte von Y 32 bis 111. */
-export function makeBigWorld(n = 2, name = 'Große Testwelt'): Map<string, Uint8Array> {
+export function makeBigWorld(n = 2, name = 'Große Testwelt', hmShift = 0): Map<string, Uint8Array> {
   const files = new Map<string, Uint8Array>()
   files.set('level.dat', makeLevelDat(name))
   const dir = 'dimensions/minecraft/overworld/region'
   for (let rz = 0; rz < n; rz++)
     for (let rx = 0; rx < n; rx++) {
       const cs: { lx: number; lz: number; nbt: Uint8Array }[] = []
-      for (let lz = 0; lz < 32; lz++) for (let lx = 0; lx < 32; lx++) cs.push({ lx, lz, nbt: makeChunk(rx * 32 + lx, rz * 32 + lz, testBlock, 4786, [2, 6]) })
+      for (let lz = 0; lz < 32; lz++) for (let lx = 0; lx < 32; lx++) cs.push({ lx, lz, nbt: makeChunk(rx * 32 + lx, rz * 32 + lz, testBlock, 4786, [2, 6], (lx >> 3) % 2 ? hmShift : 0) })
       files.set(`${dir}/r.${rx}.${rz}.mca`, makeRegion(cs))
     }
   return files

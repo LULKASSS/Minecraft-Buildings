@@ -85,10 +85,29 @@ export function decodeChunk(bytes: Uint8Array): ChunkResult {
     // aus der Zahl der Longs zurückrechnen.
     const raw = unpackAligned(hm, heightmapBits(hm.length / 2), 256)
     for (let i = 0; i < 256; i++) chunk.surface[i] = raw[i] === 0 ? NO_SURFACE : chunk.minY + raw[i]
+    // Heightmaps können veraltet oder verschoben sein (z. B. aus älteren Versionen übernommene Chunks).
+    // Dann würde das Gelände mittendrin abgeschnitten. Deshalb jede Spalte gegenprüfen und sonst nachrechnen.
+    const topY = chunk.minY + chunk.height
+    for (let i = 0; i < 256; i++) {
+      const x = i & 15, z = i >> 4, s = chunk.surface[i]
+      const ok = s !== NO_SURFACE && s > chunk.minY && s <= topY && !isAir(blockAt(chunk, x, s - 1, z)) && (s >= topY || isAir(blockAt(chunk, x, s, z)))
+      if (!ok) chunk.surface[i] = scanColumn(chunk, x, z)
+    }
   } else {
     computeSurface(chunk)
   }
   return { ok: true, chunk }
+}
+
+/** Oberster Block einer Spalte (+1), leere Abschnitte werden übersprungen. */
+function scanColumn(c: ChunkData, x: number, z: number): number {
+  for (let si = c.sections.length - 1; si >= 0; si--) {
+    const sec = c.sections[si]
+    if (!sec || (sec.palette.length === 1 && isAir(sec.palette[0]))) continue
+    const base = c.minY + si * 16
+    for (let y = base + 15; y >= base; y--) if (!isAir(blockAt(c, x, y, z))) return y + 1
+  }
+  return NO_SURFACE
 }
 
 /** Bitbreite einer Heightmap mit 256 Einträgen aus der Zahl der Longs (Einträge laufen nicht über Long-Grenzen). */
@@ -98,15 +117,7 @@ export function heightmapBits(longs: number): number {
 }
 
 function computeSurface(c: ChunkData): void {
-  for (let z = 0; z < 16; z++)
-    for (let x = 0; x < 16; x++) {
-      for (let y = c.minY + c.height - 1; y >= c.minY; y--) {
-        if (!isAir(blockAt(c, x, y, z))) {
-          c.surface[x + z * 16] = y + 1
-          break
-        }
-      }
-    }
+  for (let z = 0; z < 16; z++) for (let x = 0; x < 16; x++) c.surface[x + z * 16] = scanColumn(c, x, z)
 }
 
 /** Block an lokaler Position x,z (0…15) und Welt-Y. */

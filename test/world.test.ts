@@ -7,8 +7,8 @@ import { readChunkBytes, readHeader } from '../src/world/region'
 import { findWorldRoot, UploadSource, ZipSource, type WorldSource } from '../src/world/source'
 import { renderTile, TILE, TRACE } from '../src/world/tile'
 import { findHotspots } from '../src/world/traces'
-import { makeLevelDat, makeWorld, testBlock, WATER_LEVEL } from '../src/world/demo-world'
-import { compareVersions, dirFromFiles, DirSource, pickJar, scanFolder } from '../src/world/minecraft'
+import { makeChunk, makeLevelDat, makeWorld, testBlock, WATER_LEVEL } from '../src/world/demo-world'
+import { compareVersions, dirFromFiles, DirSource, jarCandidates, pickJar, scanFolder } from '../src/world/minecraft'
 
 const world = makeWorld()
 
@@ -182,7 +182,8 @@ describe('Minecraft-Ordner', () => {
   it('nimmt die .jar der Weltversion, sonst die neueste Vanilla-Version, nie Fabric', async () => {
     const s = await scanFolder(mc())
     expect(pickJar(s.versions, '26.1')?.version).toBe('26.1')
-    expect(pickJar(s.versions, '26.3')?.version).toBe('26.1') // 26.3 hat keine .jar, Fabric zählt nicht
+    expect(pickJar(s.versions, '26.3')?.version).toBe('26.1') // 26.3 hat keine .jar, Fabric-Hülle kommt zuletzt
+    expect(jarCandidates(s.versions, '26.3').map(v => v.version)).toEqual(['26.1', 'fabric-loader-0.17-26.3'])
     expect(compareVersions('26.3', '26.1')).toBeLessThan(0)
     expect(compareVersions('1.21.11', '26.1')).toBeGreaterThan(0)
   })
@@ -196,6 +197,39 @@ describe('Minecraft-Ordner', () => {
     const s = await scanFolder(dirFromFiles([...world].map(([p, d]) => file(`Meine Welt/${p}`, d))))
     expect(s.kind).toBe('world')
     expect(s.worlds).toHaveLength(1)
+  })
+  it('Modrinth App: Welten aller Profile, .jar der Fabric-Kopie unter meta/versions', async () => {
+    const list = [file('ModrinthApp/app.db', 'x')]
+    for (const [p, d] of world) list.push(file(`ModrinthApp/profiles/Fabric 26.1/saves/Realm/${p}`, p === 'level.dat' ? makeLevelDat('Realm', 4786, 3000) : d))
+    for (const [p, d] of world) list.push(file(`ModrinthApp/profiles/Vanilla/saves/Test/${p}`, p === 'level.dat' ? makeLevelDat('Test', 4786, 1000) : d))
+    list.push(file('ModrinthApp/meta/versions/26.1-0.17.2/26.1-0.17.2.jar'), file('ModrinthApp/meta/versions/26.1-0.17.2/26.1-0.17.2.json', '{}'))
+    list.push(file('ModrinthApp/meta/versions/1.21.11/1.21.11.jar'))
+    const s = await scanFolder(dirFromFiles(list))
+    expect(s.kind).toBe('modrinth')
+    expect(s.worlds.map(w => w.folder)).toEqual(['Fabric 26.1/Realm', 'Vanilla/Test'])
+    // die Kopie zur Weltversion vor einer anderen Vanilla-Version, obwohl der Name einen Loader enthält
+    expect(jarCandidates(s.versions, '26.1').map(v => v.version)).toEqual(['26.1-0.17.2', '1.21.11'])
+  })
+  it('Prism Launcher: Welten unter instances, .jar unter libraries', async () => {
+    const list = [] as ReturnType<typeof file>[]
+    for (const [p, d] of world) list.push(file(`PrismLauncher/instances/Base/.minecraft/saves/Welt/${p}`, d))
+    list.push(file('PrismLauncher/libraries/com/mojang/minecraft/26.1/minecraft-26.1-client.jar'))
+    const s = await scanFolder(dirFromFiles(list))
+    expect(s.kind).toBe('prism')
+    expect(s.worlds).toHaveLength(1)
+    expect(pickJar(s.versions, '26.1')?.version).toBe('26.1')
+  })
+  it('verschobene Heightmaps (alte Chunks) werden gegengeprüft, sonst wäre das Gelände abgeschnitten', () => {
+    for (const shift of [-64, -16, 20]) {
+      const r = decodeChunk(makeChunk(1, 1, testBlock, 4786, undefined, shift))
+      expect(r.ok).toBe(true)
+      if (!r.ok) return
+      for (const [x, z] of [[0, 0], [7, 9], [15, 15]]) {
+        let top = 100
+        while (testBlock(16 + x, top, 16 + z) === 'minecraft:air') top--
+        expect(r.chunk.surface[x + z * 16], `Verschiebung ${shift}`).toBe(top + 1)
+      }
+    }
   })
   it('Heightmap-Bitbreite aus der Zahl der Longs (384 Blöcke hoch → 9 Bit)', () => {
     expect(heightmapBits(37)).toBe(9)

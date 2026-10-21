@@ -25,12 +25,15 @@ export async function cachedJar(version: string): Promise<File | null> {
 
 /** client.jar laden; json = versions/<v>/<v>.json aus dem Minecraft-Ordner, falls vorhanden (spart einen Abruf). */
 export async function fetchJar(wanted: string, onProgress: (done: number, total: number) => void, json?: File | null): Promise<File> {
-  let meta: { id: string; downloads: { client: { url: string; size: number } } }
-  if (json) meta = JSON.parse(await json.text())
-  else {
+  type Meta = { id: string; downloads?: { client?: { url: string; size: number } } }
+  let meta: Meta | null = null
+  // die Versionsdatei aus dem Ordner spart einen Abruf – Loader-Profile (Fabric) haben dort aber oft keinen Download-Eintrag
+  if (json) try { meta = JSON.parse(await json.text()) as Meta } catch { meta = null }
+  if (!meta?.downloads?.client) {
     const v = await resolveVersion(wanted)
-    meta = await (await fetch(v.url)).json()
+    meta = (await (await fetch(v.url)).json()) as Meta
   }
+  if (!meta.downloads?.client) throw new Error('Mojang nennt keine Spieldatei für diese Version.')
   const hit = await cachedJar(meta.id)
   if (hit) return hit
   const { url, size } = meta.downloads.client

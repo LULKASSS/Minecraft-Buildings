@@ -149,7 +149,7 @@ export interface VersionEntry {
 }
 
 export interface Scan {
-  kind: 'minecraft' | 'saves' | 'world'
+  kind: 'minecraft' | 'modrinth' | 'prism' | 'saves' | 'world'
   worlds: WorldEntry[]
   versions: VersionEntry[]
 }
@@ -167,7 +167,33 @@ async function readWorld(folder: string, d: Dir): Promise<WorldEntry | null> {
   }
 }
 
-/** Was liegt in dem freigegebenen Ordner? Welten (zuletzt gespielte zuerst) und Spielversionen. */
+const subdirs = async (d: Dir) => (await d.entries()).filter(e => e.kind === 'dir').map(e => e.name)
+
+/** Welten in einem saves-Ordner; label kommt vor den Ordnernamen (Profil bei Modrinth/Prism). */
+async function worldsIn(saves: Dir, label = ''): Promise<WorldEntry[]> {
+  const names = (await subdirs(saves)).slice(0, 300)
+  const found = await Promise.all(names.map(async n => {
+    const d = await saves.dir(n)
+    return d ? readWorld(label ? `${label}/${n}` : n, d) : null
+  }))
+  return found.filter((w): w is WorldEntry => !!w)
+}
+
+/** versions/<v>/<v>.jar (offizieller Launcher, Modrinth unter meta/versions). */
+async function versionsIn(vdir: Dir): Promise<VersionEntry[]> {
+  const out: VersionEntry[] = []
+  for (const n of await subdirs(vdir)) {
+    const d = await vdir.dir(n)
+    if (d) out.push({ version: n, jar: await d.file(`${n}.jar`), json: await d.file(`${n}.json`) })
+  }
+  return out
+}
+
+/**
+ * Was liegt in dem gewählten Ordner? Welten (zuletzt gespielte zuerst) und Spielversionen mit .jar.
+ * Erkennt: Minecraft-Ordner (saves, versions), Modrinth App (profiles/<Profil>/saves, meta/versions),
+ * Prism Launcher (instances/<Instanz>/.minecraft/saves, libraries/com/mojang/minecraft), saves-Ordner, einzelne Welt.
+ */
 export async function scanFolder(root: Dir): Promise<Scan> {
   const top = await root.entries()
   if (top.some(e => e.kind === 'file' && e.name === 'level.dat')) {
@@ -175,29 +201,49 @@ export async function scanFolder(root: Dir): Promise<Scan> {
     return { kind: 'world', worlds: w ? [w] : [], versions: [] }
   }
   const has = (n: string) => top.some(e => e.kind === 'dir' && e.name === n)
+  const sort = (ws: WorldEntry[]) => ws.sort((a, b) => b.lastPlayed - a.lastPlayed)
+
+  // Modrinth App: Welten aller Profile, .jar je Profil unter meta/versions/<Spiel>-<Loader>/
+  if (has('profiles') && has('meta')) {
+    const profiles = (await root.dir('profiles'))!
+    const worlds: WorldEntry[] = []
+    for (const name of await subdirs(profiles)) {
+      const saves = await (await profiles.dir(name))?.dir('saves')
+      if (saves) worlds.push(...(await worldsIn(saves, name)))
+    }
+    const vdir = await (await root.dir('meta'))!.dir('versions')
+    return { kind: 'modrinth', worlds: sort(worlds), versions: vdir ? await versionsIn(vdir) : [] }
+  }
+  // Prism / MultiMC
+  if (has('instances')) {
+    const inst = (await root.dir('instances'))!
+    const worlds: WorldEntry[] = []
+    for (const name of await subdirs(inst)) {
+      const i = await inst.dir(name)
+      const game = (await i?.dir('.minecraft')) ?? (await i?.dir('minecraft'))
+      const saves = await game?.dir('saves')
+      if (saves) worlds.push(...(await worldsIn(saves, name)))
+    }
+    const versions: VersionEntry[] = []
+    const mc = await walkDir(root, 'libraries/com/mojang/minecraft')
+    if (mc)
+      for (const v of await subdirs(mc)) {
+        const d = await mc.dir(v)
+        if (d) versions.push({ version: v, jar: await d.file(`minecraft-${v}-client.jar`), json: null })
+      }
+    return { kind: 'prism', worlds: sort(worlds), versions }
+  }
   const isMc = has('saves') || has('versions')
   const savesDir = isMc ? await root.dir('saves') : root
-  const worlds: WorldEntry[] = []
-  if (savesDir) {
-    const subs = (await savesDir.entries()).filter(e => e.kind === 'dir').slice(0, 300)
-    const found = await Promise.all(subs.map(async e => {
-      const d = await savesDir.dir(e.name)
-      return d ? readWorld(e.name, d) : null
-    }))
-    for (const w of found) if (w) worlds.push(w)
-  }
-  worlds.sort((a, b) => b.lastPlayed - a.lastPlayed)
-  const versions: VersionEntry[] = []
+  const worlds = savesDir ? await worldsIn(savesDir) : []
   const vdir = isMc ? await root.dir('versions') : null
-  if (vdir) {
-    for (const e of await vdir.entries()) {
-      if (e.kind !== 'dir') continue
-      const d = await vdir.dir(e.name)
-      if (!d) continue
-      versions.push({ version: e.name, jar: await d.file(`${e.name}.jar`), json: await d.file(`${e.name}.json`) })
-    }
-  }
-  return { kind: isMc ? 'minecraft' : 'saves', worlds, versions }
+  return { kind: isMc ? 'minecraft' : 'saves', worlds: sort(worlds), versions: vdir ? await versionsIn(vdir) : [] }
+}
+
+async function walkDir(d: Dir, path: string): Promise<Dir | null> {
+  let cur: Dir | null = d
+  for (const p of path.split('/')) cur = cur ? await cur.dir(p) : null
+  return cur
 }
 
 /** Versionsnummern vergleichen (26.3 > 26.2 > 1.21.11); Snapshots und Unbekanntes zuletzt. */
@@ -212,8 +258,19 @@ export function compareVersions(a: string, b: string): number {
   return 0
 }
 
-/** Passende .jar: die Version der Welt, sonst die neueste Vanilla-Version mit .jar. */
+/**
+ * .jar-Kandidaten in der Reihenfolge, in der sie probiert werden: genau die Weltversion, dann deren
+ * Loader-Kopien (Modrinth: „26.1-0.17.2“), dann die neuesten Vanilla-Versionen, Loader-Ordner zuletzt
+ * (beim offiziellen Launcher liegt dort oft nur eine leere Hülle – das merkt erst das Laden).
+ */
+export function jarCandidates(versions: VersionEntry[], worldVersion: string): VersionEntry[] {
+  const withJar = versions.filter(v => v.jar)
+  const rank = (v: VersionEntry) =>
+    v.version === worldVersion ? 0 : worldVersion && v.version.startsWith(`${worldVersion}-`) ? 1 : MODDED.test(v.version) ? 3 : 2
+  return withJar.sort((a, b) => rank(a) - rank(b) || compareVersions(a.version.split('-')[0], b.version.split('-')[0]))
+}
+
+/** Erste Wahl unter den Kandidaten. */
 export function pickJar(versions: VersionEntry[], worldVersion: string): VersionEntry | null {
-  const vanilla = versions.filter(v => v.jar && !MODDED.test(v.version)).sort((a, b) => compareVersions(a.version, b.version))
-  return vanilla.find(v => v.version === worldVersion) ?? vanilla[0] ?? null
+  return jarCandidates(versions, worldVersion)[0] ?? null
 }
