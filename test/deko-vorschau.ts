@@ -2,7 +2,9 @@
 import * as THREE from 'three'
 import type { Blueprint } from '../src/blueprint/blueprint'
 import { DEKO } from '../src/catalog/deko'
-import { buildWell } from '../src/catalog/small'
+import { buildWell, wellForms } from '../src/catalog/small'
+import { bridgeForms, buildBridge } from '../src/catalog/bridge'
+import type { Ground } from '../src/style/builder'
 import { STYLES, type Size } from '../src/catalog/styles'
 import { meshFallback } from '../src/render/mesher'
 import { isOpaqueCube } from '../src/render/shapes'
@@ -14,9 +16,38 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffe
 renderer.setSize(W, H, false)
 renderer.outputColorSpace = THREE.SRGBColorSpace
 
-function shot(bp: Blueprint, tex: TexturedMesher | null): string {
+/** Fluss quer zur Brücke (Wasser x −5 … 6, Ufer 0 und 2), damit man die Brücke im Gelände sieht. */
+function river(hw: number): Ground {
+  const x0 = -46, z0 = -hw - 1, w = 93, d = 2 * hw + 3
+  const h: number[] = [], wet: number[] = []
+  for (let k = 0; k < d; k++)
+    for (let i = 0; i < w; i++) {
+      const x = x0 + i, inWater = x >= -5 && x <= 6
+      h.push(inWater ? -4 : x < 0 ? 0 : 2)
+      if (inWater) wet.push(k * w + i)
+    }
+  return { x0, z0, w, d, h, wet, water: -1 }
+}
+
+/** Gelände um eine Brücke als zusätzliche Blöcke (in Bauwerk-Koordinaten). */
+function riverBlocks(bp: Blueprint, hw: number): { x: number; y: number; z: number; state: string }[] {
+  const g = river(hw)
+  const [ax, ay, az] = bp.anchor
+  const out: { x: number; y: number; z: number; state: string }[] = []
+  for (let x = -ax - 4; x < bp.size[0] - ax + 4; x++)
+    for (let z = -hw - 4; z <= hw + 4; z++) {
+      const inWater = x >= -5 && x <= 6
+      const top = inWater ? -4 : x < 0 ? 0 : 2
+      const free = (y: number) => bp.get(x + ax, y + ay, z + az) === 'minecraft:air'
+      for (let y = top - 2; y <= top; y++) if (free(y)) out.push({ x: x + ax, y: y + ay, z: z + az, state: y === top && !inWater ? 'minecraft:grass_block[snowy=false]' : 'minecraft:dirt' })
+      if (inWater) for (let y = top + 1; y <= g.water!; y++) if (free(y)) out.push({ x: x + ax, y: y + ay, z: z + az, state: 'minecraft:water[level=0]' })
+    }
+  return out
+}
+
+function shot(bp: Blueprint, tex: TexturedMesher | null, extra: { x: number; y: number; z: number; state: string }[] = []): string {
   const solid = new Set<string>()
-  const list = bp.list()
+  const list = [...bp.list(), ...extra]
   for (const b of list) if (isOpaqueCube(b.state)) solid.add(`${b.x},${b.y},${b.z}`)
   const occ = (x: number, y: number, z: number) => solid.has(`${x},${y},${z}`)
   const data = tex ? tex.mesh(list, occ, false) : meshFallback(list, { occludes: occ })
@@ -46,7 +77,8 @@ function render(tex: TexturedMesher | null): void {
   out.innerHTML = ''
   const which = new URLSearchParams(location.search).get('nur')
   const sizes = (new URLSearchParams(location.search).get('groesse') ?? 'M').split(',') as Size[]
-  const items = [...DEKO.map(e => ({ id: e.id, label: e.label, build: e.build })), { id: 'brunnen', label: 'Brunnen', build: buildWell }]
+  type Item = { id: string; label: string; build: typeof buildWell; forms?: (style: string) => { id: string; label: string }[] }
+  const items: Item[] = [...DEKO.map(e => ({ id: e.id, label: e.label, build: e.build })), { id: 'brunnen', label: 'Brunnen', build: buildWell, forms: wellForms }, { id: 'bruecke', label: 'Brücke', build: buildBridge, forms: bridgeForms }]
   for (const e of items) {
     if (which && !which.split(',').includes(e.id)) continue
     const h = document.createElement('h2')
@@ -57,12 +89,15 @@ function render(tex: TexturedMesher | null): void {
     row.className = 'row'
     row.id = `r-${e.id}`
     for (const st of STYLES)
-      for (const size of sizes) {
-        const bp = e.build({ generator: e.id, version: 1, seed: 7, params: { style: st.id, palette: st.palettes[0], size } })
-        const f = document.createElement('figure')
-        f.innerHTML = `<img src="${shot(bp, tex)}" width="${W}" height="${H}"><figcaption>${e.label} · ${st.label} · ${size}</figcaption>`
-        row.appendChild(f)
-      }
+      for (const size of sizes)
+        for (const form of e.forms ? e.forms(st.id) : [null]) {
+          const hw = { S: 1, M: 2, L: 3 }[size]
+          const ground = e.id === 'bruecke' ? river(hw) : undefined
+          const bp = e.build({ generator: e.id, version: 1, seed: 7, params: { style: st.id, palette: st.palettes[0], size, ...(form ? { form: form.id } : {}), ...(ground ? { ground } : {}) } })
+          const f = document.createElement('figure')
+          f.innerHTML = `<img src="${shot(bp, tex, ground ? riverBlocks(bp, hw) : [])}" width="${W}" height="${H}"><figcaption>${form ? form.label : e.label} · ${st.label} · ${size}</figcaption>`
+          row.appendChild(f)
+        }
     out.appendChild(row)
   }
   ;(window as unknown as { fertig: boolean }).fertig = true

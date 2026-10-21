@@ -118,8 +118,24 @@ export function buildTower(source: BlueprintSource): Blueprint {
 const WELL: Record<Size, number> = { S: 2, M: 3, L: 4 }
 
 export function wellExtent(source?: BlueprintSource) {
-  const R = WELL[((source?.params as unknown as StyledParams | undefined)?.size) ?? 'M'] + 2
+  const R = WELL[((source?.params as unknown as StyledParams | undefined)?.size) ?? 'M'] + 3
   return { x0: -R, z0: -R, x1: R, z1: R }
+}
+
+/** Bauarten des Brunnens je Stil. „klassisch“ ist der bisherige Brunnen und heißt je Stil anders. */
+type WellForm = 'klassisch' | 'spring' | 'dorf' | 'haus' | 'becken'
+const WELL_FORMS: Record<string, WellForm[]> = {
+  mittelalter: ['klassisch', 'haus', 'dorf', 'spring'],
+  japan: ['klassisch', 'dorf', 'spring'],
+  modern: ['klassisch', 'becken', 'spring'],
+  wueste: ['klassisch', 'spring', 'dorf'],
+  steampunk: ['klassisch', 'haus', 'spring'],
+}
+const CLASSIC_LABEL: Record<string, string> = { modern: 'Säulenbrunnen', wueste: 'Sonnendach', japan: 'Tsukubai' }
+const WELL_LABEL: Record<Exclude<WellForm, 'klassisch'>, string> = { spring: 'Springbrunnen', dorf: 'Dorfbrunnen', haus: 'Brunnenhaus', becken: 'Wasserbecken' }
+
+export function wellForms(style: string): { id: string; label: string }[] {
+  return (WELL_FORMS[style] ?? WELL_FORMS.mittelalter).map(id => ({ id, label: id === 'klassisch' ? (CLASSIC_LABEL[style] ?? 'Ziehbrunnen') : WELL_LABEL[id] }))
 }
 
 /** Achteck mit Halbmesser R (Ecken abgeschnitten); Modern bleibt eckig. */
@@ -128,6 +144,11 @@ function octagon(R: number, square: boolean): (x: number, z: number) => boolean 
 }
 
 export function buildWell(source: BlueprintSource): Blueprint {
+  const form = (source.params as { form?: string }).form
+  if (form === 'spring') return buildFountain(source)
+  if (form === 'dorf') return buildTroughWell(source)
+  if (form === 'haus') return buildWellHouse(source)
+  if (form === 'becken') return buildPool(source)
   const { p, st, b, g } = setup(source)
   const R = WELL[p.size]
   const square = st.id === 'modern' || st.id === 'japan'
@@ -224,6 +245,170 @@ export function buildWell(source: BlueprintSource): Blueprint {
     if (st.id === 'steampunk') b.set(0, top + 2, 0, 'minecraft:lightning_rod[facing=up]')
   }
   return b.toBlueprint(`Brunnen (${st.label})`, source)
+}
+
+/** Pflaster ringsum und Fundament unter allen Zellen. */
+function paved(b: Builder, g: Ground | undefined, inside: (x: number, z: number) => boolean, x0: number, z0: number, x1: number, z1: number): void {
+  const cells: [number, number][] = []
+  for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) if (inside(x, z)) cells.push([x, z])
+  foundation(b, g, cells)
+  for (const [x, z] of cells) b.role(x, 0, z, 'path')
+}
+
+/** Laterne auf einem Pfosten (Zaun bzw. Mauer). */
+function lampPost(b: Builder, x: number, z: number, h: number): void {
+  for (let y = 1; y <= h; y++) b.form(x, y, z, 'detail', 'fence')
+  b.set(x, h + 1, z, `${b.main('light')}[hanging=false]`)
+}
+
+/** Springbrunnen: großes Becken, ab M ein erhöhtes Innenbecken, in der Mitte eine Säule, oben quillt Wasser. */
+function buildFountain(source: BlueprintSource): Blueprint {
+  const { p, st, b, g } = setup(source)
+  const R = WELL[p.size] + 1
+  const inBasin = octagon(R, st.id === 'modern'), inPave = octagon(R + 1, st.id === 'modern')
+  paved(b, g, inPave, -R - 1, -R - 1, R + 1, R + 1)
+  const rim = (x: number, z: number) => inBasin(x, z) && (!inBasin(x + 1, z) || !inBasin(x - 1, z) || !inBasin(x, z + 1) || !inBasin(x, z - 1))
+  for (let z = -R; z <= R; z++)
+    for (let x = -R; x <= R; x++) {
+      if (!inBasin(x, z)) continue
+      if (rim(x, z)) {
+        b.role(x, 0, z, 'sockel', {}, 1)
+        b.form(x, 1, z, 'trim', 'slab', { type: 'bottom' })
+      } else {
+        b.set(x, 0, z, 'minecraft:water[level=0]')
+        b.set(x, -1, z, 'minecraft:water[level=0]')
+        b.role(x, -2, z, 'sockel', {}, 0)
+      }
+    }
+  const tier = R >= 4
+  if (tier) {
+    // Innenbecken eine Reihe höher: Boden aus Sockel, Rand, Wasser darin
+    for (let z = -2; z <= 2; z++)
+      for (let x = -2; x <= 2; x++) {
+        const edge = Math.max(Math.abs(x), Math.abs(z)) === 2
+        if (edge && Math.abs(x) === 2 && Math.abs(z) === 2) continue // Ecken frei, sieht runder aus
+        for (let y = -1; y <= 0; y++) b.role(x, y, z, 'sockel', {}, 0)
+        if (edge) b.form(x, 1, z, 'trim', 'stairs', { facing: facingTo(-x, -z), half: 'bottom' })
+        else b.set(x, 1, z, 'minecraft:water[level=0]')
+      }
+  }
+  // Säule mit Schale, Wasser quillt oben heraus (fließt im Spiel ins Becken; in Litematica nur die Quelle)
+  const top = tier ? 4 : 3
+  for (let y = tier ? 1 : -1; y < top; y++) b.role(0, y, 0, 'trim')
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as [number, number][]) b.form(dx, top - 1, dz, 'trim', 'stairs', { facing: facingTo(-dx, -dz), half: 'top' })
+  b.set(0, top, 0, 'minecraft:water[level=0]')
+  // Laternen an den Ecken des Pflasters
+  if (p.size !== 'S') for (const [x, z] of [[-R - 1, 0], [R + 1, 0], [0, -R - 1], [0, R + 1]] as [number, number][]) lampPost(b, x, z, 2)
+  return b.toBlueprint(`Springbrunnen (${st.label})`, source)
+}
+
+/** Dorfbrunnen: langer Trog vor einer Wand mit Wasserspeier, Fass und Blumentöpfen. */
+function buildTroughWell(source: BlueprintSource): Blueprint {
+  const { p, st, b, g } = setup(source)
+  const L = WELL[p.size] + 1
+  paved(b, g, () => true, -L - 1, -3, L + 1, 2)
+  // Trog: Rand aus Sockel, eine Reihe Wasser, Boden darunter
+  for (let x = -L; x <= L; x++)
+    for (let z = -1; z <= 1; z++) {
+      const edge = Math.abs(x) === L || z !== 0
+      if (edge) {
+        b.role(x, 0, z, 'sockel', {}, 1)
+        b.form(x, 1, z, 'trim', 'slab', { type: 'bottom' })
+      } else {
+        b.set(x, 0, z, 'minecraft:water[level=0]')
+        b.role(x, -1, z, 'sockel', {}, 0)
+      }
+    }
+  // Wand dahinter mit Speier in der Mitte
+  const wh = 3
+  for (let x = -2; x <= 2; x++) {
+    for (let y = 1; y <= wh; y++) b.role(x, y, -2, Math.abs(x) === 2 ? 'frame' : 'sockel', {}, 1)
+    b.form(x, wh + 1, -2, 'trim', 'slab', { type: 'bottom' })
+  }
+  b.form(0, 2, -1, 'trim', 'stairs', { facing: 'north', half: 'top' })
+  b.set(0, wh + 1, -2, `${b.main('light')}[hanging=false]`)
+  for (const x of [-2, 2]) b.set(x, wh + 2, -2, 'minecraft:potted_red_tulip')
+  b.set(-L - 1, 1, 1, 'minecraft:barrel[facing=up]')
+  b.set(L + 1, 1, 1, 'minecraft:water_cauldron[level=3]')
+  if (st.id === 'japan') b.set(L + 1, 1, -1, 'minecraft:potted_bamboo')
+  return b.toBlueprint(`Dorfbrunnen (${st.label})`, source)
+}
+
+/** Brunnenhaus: eckiges Becken unter einem Zeltdach auf vier Pfosten, Winde mit Kette und Eimer. */
+function buildWellHouse(source: BlueprintSource): Blueprint {
+  const { p, st, b, g } = setup(source)
+  const R = WELL[p.size]
+  const inBasin = octagon(R, true)
+  paved(b, g, octagon(R + 1, true), -R - 1, -R - 1, R + 1, R + 1)
+  for (let z = -R; z <= R; z++)
+    for (let x = -R; x <= R; x++) {
+      if (Math.max(Math.abs(x), Math.abs(z)) === R) {
+        b.role(x, 0, z, 'sockel', {}, 1)
+        b.form(x, 1, z, 'sockel', 'slab', { type: 'bottom' })
+      } else if (inBasin(x, z)) {
+        b.set(x, 0, z, 'minecraft:water[level=0]')
+        b.set(x, -1, z, 'minecraft:water[level=0]')
+        b.role(x, -2, z, 'sockel', {}, 0)
+      }
+    }
+  const eave = 5
+  for (const [x, z] of [[-R, -R], [R, -R], [-R, R], [R, R]] as [number, number][]) for (let y = 1; y < eave; y++) b.beam(x, y, z, 'frame', 'y')
+  for (let i = -R; i <= R; i++) {
+    b.beam(i, eave, -R, 'frame', 'x')
+    b.beam(i, eave, R, 'frame', 'x')
+    b.beam(-R, eave, i, 'frame', 'z')
+    b.beam(R, eave, i, 'frame', 'z')
+  }
+  // Zeltdach: Ringe aus Stufen, jeder eine Reihe höher und einen Block enger, Kante überstehend
+  for (let d = R + 1, y = eave; d >= 1; d--, y++)
+    for (let i = -d; i <= d; i++) {
+      b.form(i, y, -d, d === R + 1 ? 'trim' : 'roof', 'stairs', { facing: 'south', half: 'bottom' })
+      b.form(i, y, d, d === R + 1 ? 'trim' : 'roof', 'stairs', { facing: 'north', half: 'bottom' })
+      if (Math.abs(i) < d) {
+        b.form(-d, y, i, d === R + 1 ? 'trim' : 'roof', 'stairs', { facing: 'east', half: 'bottom' })
+        b.form(d, y, i, d === R + 1 ? 'trim' : 'roof', 'stairs', { facing: 'west', half: 'bottom' })
+      }
+    }
+  const peak = eave + R + 1
+  b.role(0, peak, 0, 'trim')
+  b.set(0, peak + 1, 0, st.id === 'steampunk' ? 'minecraft:lightning_rod[facing=up]' : `${b.main('light')}[hanging=false]`)
+  // Winde quer über dem Becken, Kette mit Eimer
+  for (const x of [-R, R]) for (let y = 2; y <= 3; y++) b.form(x, y, 0, 'detail', 'fence')
+  for (let x = -R; x <= R; x++) b.beam(x, 4, 0, 'frame', 'x')
+  const chain = st.id === 'steampunk' ? 'minecraft:copper_chain[axis=y]' : 'minecraft:iron_chain[axis=y]'
+  b.set(0, 3, 0, chain)
+  b.set(0, 2, 0, chain)
+  b.set(0, 1, 0, 'minecraft:water_cauldron[level=3]')
+  for (const [x, z] of [[-R - 1, -R - 1], [R + 1, R + 1]] as [number, number][]) b.set(x, 1, z, 'minecraft:barrel[facing=up]')
+  return b.toBlueprint(`Brunnenhaus (${st.label})`, source)
+}
+
+/** Modernes Wasserbecken: langes, flaches Becken mit einer Reihe Fontänen und Pflanzkübeln an den Enden. */
+function buildPool(source: BlueprintSource): Blueprint {
+  const { p, st, b, g } = setup(source)
+  const L = WELL[p.size] + 2, D = Math.max(1, WELL[p.size] - 1)
+  paved(b, g, () => true, -L - 1, -D - 1, L + 1, D + 1)
+  for (let z = -D; z <= D; z++)
+    for (let x = -L; x <= L; x++) {
+      if (Math.abs(x) === L || Math.abs(z) === D) {
+        b.role(x, 0, z, 'sockel', {}, 1)
+        b.form(x, 1, z, 'trim', 'slab', { type: 'bottom' })
+      } else {
+        b.set(x, 0, z, 'minecraft:water[level=0]')
+        b.role(x, -1, z, 'sockel', {}, 0)
+      }
+    }
+  // Fontänen: Düse aus Trim, darüber eine Quelle
+  for (let x = -L + 2; x <= L - 2; x += 2) {
+    b.role(x, 0, 0, 'trim')
+    b.set(x, 1, 0, 'minecraft:water[level=0]')
+  }
+  for (const x of [-L - 1, L + 1]) {
+    b.role(x, 1, 0, 'sockel', {}, 0)
+    b.set(x, 2, 0, 'minecraft:potted_azalea_bush')
+  }
+  for (const [x, z] of [[-L, -D - 1], [L, -D - 1], [-L, D + 1], [L, D + 1]] as [number, number][]) b.set(x, 1, z, `${b.main('light')}[hanging=false]`)
+  return b.toBlueprint(`Wasserbecken (${st.label})`, source)
 }
 
 // ---------- Laterne ----------

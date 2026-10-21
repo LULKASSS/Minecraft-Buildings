@@ -408,13 +408,16 @@ export class WorldView {
   // ---------- Gelände unter Bauwerken ----------
 
   /** Grund einer Spalte (oberster fester Block, Wasser wird durchschaut), relativ zu ref; null = unbekannt. */
-  private surfaceY(x: number, z: number, ref: number): { y: number; wet: boolean; soil: boolean } | null {
+  private surfaceY(x: number, z: number, ref: number): { y: number; wet: boolean; soil: boolean; water?: number } | null {
     let wet = false
+    let water: number | undefined
     for (let y = ref + 12; y >= ref - 24; y--) {
       const t = this.terrainAt(x, y, z)
       if (!t) continue
-      if (t.startsWith('minecraft:water') || t.includes('seagrass') || t.includes('kelp')) wet = true
-      else if (isOpaqueCube(t)) return { y: y - ref, wet, soil: SOIL.test(t) }
+      if (t.startsWith('minecraft:water') || t.includes('seagrass') || t.includes('kelp')) {
+        wet = true
+        water ??= y - ref
+      } else if (isOpaqueCube(t)) return { y: y - ref, wet, soil: SOIL.test(t), water }
     }
     return null
   }
@@ -431,6 +434,7 @@ export class WorldView {
     const h: number[] = new Array(w * d)
     const wet: number[] = []
     const soil: number[] = []
+    let water: number | undefined
     for (let k = 0; k < d; k++)
       for (let i = 0; i < w; i++) {
         let dx = e.x0 + i, dz = e.z0 + k
@@ -439,10 +443,12 @@ export class WorldView {
         const s = this.surfaceY(pos[0] + dx, pos[2] + dz, pos[1])
         h[k * w + i] = s?.y ?? 0
         if (s?.wet) wet.push(k * w + i)
+        if (s?.water !== undefined) water = Math.max(water ?? -Infinity, s.water)
         if (s?.soil && !s.wet) soil.push(k * w + i)
       }
     const g: Ground = { x0: e.x0, z0: e.z0, w, d, h }
     if (wet.length) g.wet = wet
+    if (water !== undefined) g.water = water
     if (source.generator === 'pinsel') g.soil = soil
     return g
   }

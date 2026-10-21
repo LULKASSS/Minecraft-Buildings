@@ -33,6 +33,8 @@ export interface Ground {
   wet?: number[]
   /** Spalten mit Erde/Gras/Moos oben: nur dort lassen sich Blumen und Gras setzen */
   soil?: number[]
+  /** höchste Wasseroberfläche im Bereich (Y des obersten Wasserblocks, relativ zum Anker) */
+  water?: number
 }
 
 /** Lässt sich hier eine Pflanze setzen? Ohne Geländedaten: ja. */

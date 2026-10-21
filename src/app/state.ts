@@ -5,7 +5,7 @@ import type { Vec3 } from '../blueprint/blueprint'
 import { boundsOf, layersOf, overlaps, place, type Bounds, type Layer, type Placed, type Placement } from '../blueprint/placement'
 import type { Rotation } from '../blueprint/transform'
 import { buildFromSource, entryOf, type Category } from '../catalog'
-import { styleById, type HouseForm, type Size } from '../catalog/styles'
+import type { Size } from '../catalog/styles'
 import type { Mix, Species } from '../catalog/nature'
 import { setCustomPalettes, type Palette } from '../style/palettes'
 import type { BlueprintSource } from '../blueprint/blueprint'
@@ -35,8 +35,8 @@ export interface BuildChoice {
   mix: Mix
   templateId: string | null
   facade: boolean
-  /** Bauform des Hauses; 'alle' = jede Variante eine andere */
-  form: HouseForm | 'alle'
+  /** Bauform (Haus, Brunnen, Brücke); 'alle' = jede Variante eine andere */
+  form: string
   /** bei 'alle': mit welcher Form die erste Variante beginnt (wechselt beim Würfeln) */
   formOffset: number
   seeds: number[]
@@ -77,8 +77,9 @@ export function newSeeds(): number[] {
 }
 
 /** Bauform der Variante i: fest gewählt oder bei 'alle' reihum, damit jede Variante anders aussieht. */
-export function formOf(b: BuildChoice, i: number): HouseForm {
-  const forms = styleById(b.style).forms
+export function formOf(b: BuildChoice, i: number): string | undefined {
+  const forms = entryOf(b.type).formsFor?.(b.style).map(f => f.id)
+  if (!forms?.length) return undefined
   if (b.form !== 'alle' && forms.includes(b.form)) return b.form
   return forms[(b.formOffset + i) % forms.length]
 }
@@ -97,7 +98,7 @@ export function choiceSource(b: BuildChoice = S.build, seed = b.seeds[b.pick], i
   const params: Record<string, unknown> =
     b.cat === 'natur' ? { size: b.size, species: b.species, mix: b.mix }
     : b.cat === 'vorlage' ? { templateId: b.templateId, ...(b.facade ? { facade: { palette: b.palette, sides: [true, true, true, true], roof: false } } : {}) }
-    : { style: b.style, palette: b.palette, size: b.size, ...(b.type === 'haus' ? { form: formOf(b, index) } : {}) }
+    : { style: b.style, palette: b.palette, size: b.size, ...(formOf(b, index) ? { form: formOf(b, index) } : {}) }
   return { generator: b.type, version: b.type === 'haus' ? 2 : 1, seed, params }
 }
 

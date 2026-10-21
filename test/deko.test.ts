@@ -4,7 +4,8 @@ import { parseState } from '../src/blueprint/blockstate'
 import type { Blueprint, BlueprintSource } from '../src/blueprint/blueprint'
 import { transformBlueprint, type Rotation } from '../src/blueprint/transform'
 import { DEKO } from '../src/catalog/deko'
-import { buildWell } from '../src/catalog/small'
+import { buildWell, wellForms } from '../src/catalog/small'
+import { bridgeForms, bridgeSpan, buildBridge } from '../src/catalog/bridge'
 import { STYLES, type Size } from '../src/catalog/styles'
 import type { Ground } from '../src/style/builder'
 import { palettesFor } from '../src/style/palettes'
@@ -77,10 +78,75 @@ describe('Brunnen', () => {
     for (const st of STYLES)
       for (const pal of palettesFor(st.id))
         for (const size of SIZES) {
-          const bp = buildWell({ generator: 'brunnen', version: 1, seed: 1, params: { style: st.id, palette: pal.id, size, ground: slope } })
-          errs.push(...check(bp, `brunnen ${st.id} ${pal.id} ${size}`))
-          if (!bp.palette.some(s => s.startsWith('minecraft:water'))) errs.push(`brunnen ${st.id} ${size}: kein Wasser`)
+          for (const f of [undefined, ...wellForms(st.id).map(f => f.id)]) {
+            const what = `brunnen ${f ?? '-'} ${st.id} ${pal.id} ${size}`
+            try {
+              const bp = buildWell({ generator: 'brunnen', version: 1, seed: 1, params: { style: st.id, palette: pal.id, size, ground: slope, ...(f ? { form: f } : {}) } })
+              errs.push(...check(bp, what))
+              if (!bp.palette.some(s => s.startsWith('minecraft:water'))) errs.push(`${what}: kein Wasser`)
+            } catch (err) {
+              errs.push(`${what}: ${(err as Error).message}`)
+            }
+          }
         }
+    expect(errs).toEqual([])
+  })
+  it('Bauarten sehen verschieden aus, ohne Form wie bisher', () => {
+    for (const st of STYLES) {
+      const sizes = wellForms(st.id).map(f => buildWell({ generator: 'brunnen', version: 1, seed: 1, params: { style: st.id, palette: st.palettes[0], size: 'M', form: f.id } }).size.join('x') + f.id)
+      expect(new Set(sizes).size, st.id).toBe(wellForms(st.id).length)
+      const alt = buildWell({ generator: 'brunnen', version: 1, seed: 1, params: { style: st.id, palette: st.palettes[0], size: 'M' } })
+      const klassisch = buildWell({ generator: 'brunnen', version: 1, seed: 1, params: { style: st.id, palette: st.palettes[0], size: 'M', form: 'klassisch' } })
+      expect(Array.from(klassisch.blocks)).toEqual(Array.from(alt.blocks))
+    }
+  })
+})
+
+/** Fluss quer zur Brücke: Wasser von x = -4 bis 5, Grund 3 tief, Wasserspiegel -1, Ufer auf 0 (links) und 2 (rechts). */
+function river(hw: number): Ground {
+  const x0 = -46, z0 = -hw - 1, w = 93, d = 2 * hw + 3
+  const h: number[] = [], wet: number[] = []
+  for (let k = 0; k < d; k++)
+    for (let i = 0; i < w; i++) {
+      const x = x0 + i
+      const inWater = x >= -4 && x <= 5
+      h.push(inWater ? -4 : x < 0 ? 0 : 2)
+      if (inWater) wet.push(k * w + i)
+    }
+  return { x0, z0, w, d, h, wet, water: -1 }
+}
+
+describe('Brücke', () => {
+  it('spannt von Ufer zu Ufer, auch wenn der Mauszeiger am Ufer steht', () => {
+    const g = river(2)
+    expect(bridgeSpan(g, 'M')).toEqual({ a: -5, e: 6, water: -1, overWater: true })
+    const shifted: Ground = { ...g, x0: g.x0 - 10 } // Mauszeiger 10 Blöcke rechts vom Fluss, am Ufer
+    expect(bridgeSpan(shifted, 'M')).toMatchObject({ a: -15, e: -4 })
+    expect(bridgeSpan(undefined, 'M')).toMatchObject({ overWater: false })
+  })
+  it('baut in allen Stilen, Formen und Größen mit gültigen Blöcken, Fahrbahn über dem Wasser', () => {
+    const errs: string[] = []
+    for (const st of STYLES)
+      for (const pal of palettesFor(st.id))
+        for (const size of SIZES)
+          for (const f of bridgeForms(st.id)) {
+            const what = `brücke ${f.id} ${st.id} ${pal.id} ${size}`
+            try {
+              const hw = { S: 1, M: 2, L: 3 }[size]
+              const bp = buildBridge({ generator: 'bruecke', version: 1, seed: 2, params: { style: st.id, palette: pal.id, size, form: f.id, ground: river(hw) } })
+              errs.push(...check(bp, what))
+              // über der Flussmitte (x = 0) liegt eine Fahrbahn über dem Wasser, darunter bleibt eine Reihe Luft für Boote
+              const [ax, ay, az] = bp.anchor
+              let top = -99
+              for (let y = 0; y < bp.size[1]; y++) if (bp.get(ax, y, az) !== 'minecraft:air') top = y - ay
+              if (top < 1) errs.push(`${what}: keine Fahrbahn über dem Wasser (oberster Block ${top})`)
+              if (bp.get(ax, ay, az) !== 'minecraft:air') errs.push(`${what}: kein Platz für Boote (y 0 belegt)`)
+              // reicht bis an beide Ufer
+              if (-ax > -5 || bp.size[0] - 1 - ax < 6) errs.push(`${what}: zu kurz (${-ax} … ${bp.size[0] - 1 - ax})`)
+            } catch (err) {
+              errs.push(`${what}: ${(err as Error).message}`)
+            }
+          }
     expect(errs).toEqual([])
   })
 })

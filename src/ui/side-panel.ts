@@ -4,7 +4,7 @@ import { boundsOf, type Placement } from '../blueprint/placement'
 import { blueprintMaterials } from '../blueprint/materials'
 import { buildFromSource, CATALOG, type Category } from '../catalog'
 import { MIXES, SPECIES } from '../catalog/nature'
-import { HOUSE_FORMS, STYLES, type HouseForm, type Size } from '../catalog/styles'
+import { STYLES, type Size } from '../catalog/styles'
 import { templateList } from '../catalog/template'
 import { thumbnail } from '../render/thumbs'
 import type { TexturedMesher } from '../render/textured'
@@ -147,9 +147,10 @@ function chooser(a: SideActions): string {
   if (types.length) html += `<div class="chips">${types.map(t => chip('data-btype', t.id, t.label, c.type === t.id)).join('')}</div>`
 
   const cur = CATALOG.find(e => e.id === c.type)
-  if (cur?.forms) {
-    const forms = STYLES.find(st => st.id === c.style)!.forms
-    html += `<div class="sub">Form</div><div class="chips">${chip('data-form', 'alle', 'Alle', c.form === 'alle')}${HOUSE_FORMS.filter(f => forms.includes(f.id)).map(f => chip('data-form', f.id, f.label, c.form === f.id)).join('')}</div>`
+  const forms = cur?.formsFor?.(c.style) ?? []
+  if (forms.length > 1) {
+    const on = forms.some(f => f.id === c.form) ? c.form : 'alle'
+    html += `<div class="sub">Form</div><div class="chips">${chip('data-form', 'alle', 'Alle', on === 'alle')}${forms.map(f => chip('data-form', f.id, f.label, on === f.id)).join('')}</div>`
   }
   if (c.cat === 'gebaeude' || c.cat === 'deko' || (c.cat === 'vorlage' && c.facade)) {
     html += `<div class="sub">Stil</div><div class="chips">${STYLES.map(st => chip('data-style', st.id, st.label, c.style === st.id)).join('')}</div>`
@@ -184,8 +185,8 @@ function paletteRow(pal: Palette, on: boolean, a: SideActions): string {
 const thumbCache = new Map<string, { url: string; label: string }>()
 
 /** Bauform als Vorsatz in der Variantenzeile, z. B. „Winkelhaus · “ */
-function formLabel(src: { params: Record<string, unknown> }): string {
-  const f = HOUSE_FORMS.find(x => x.id === src.params.form)
+function formLabel(src: { generator: string; params: Record<string, unknown> }): string {
+  const f = CATALOG.find(e => e.id === src.generator)?.formsFor?.(String(src.params.style)).find(x => x.id === src.params.form)
   return f ? `${f.label} · ` : ''
 }
 
@@ -355,8 +356,11 @@ function bind(el: HTMLElement, a: SideActions): void {
     S.build.type = v === 'vorlage' ? 'vorlage' : firstOf(v as Category)
     S.placing = null
   })
-  choose('data-btype', v => (S.build.type = v))
-  choose('data-form', v => (S.build.form = v as HouseForm | 'alle'))
+  choose('data-btype', v => {
+    S.build.type = v
+    S.build.form = 'alle'
+  })
+  choose('data-form', v => (S.build.form = v))
   choose('data-style', v => {
     S.build.style = v
     S.build.palette = STYLES.find(s => s.id === v)!.palettes[0]
