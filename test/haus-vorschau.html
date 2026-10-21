@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Haus-Vorschau</title>
+<style>
+  body { margin: 0; font: 13px system-ui; background: #ececf1; }
+  #grid { display: grid; grid-template-columns: repeat(var(--cols, 3), 480px); gap: 8px; padding: 8px; }
+  figure { margin: 0; background: #fff; border-radius: 8px; overflow: hidden; }
+  figcaption { padding: 4px 8px; }
+  img { display: block; width: 480px; height: 360px; }
+</style>
+<input id="jar" type="file" />
+<div id="grid"></div>
+<script type="module" src="./haus-vorschau.ts"></script>

@@ -102,6 +102,24 @@ describe('Generatoren: alle Stile, Paletten, Größen, Varianten', () => {
             for (const seed of gen === 'haus' ? [0, 1, 2, 3] : [0, 1]) errs.push(...check({ generator: gen, version: 1, seed, params: { style: st.id, palette: pal, size } }))
     expect(errs.slice(0, 8)).toEqual([])
   })
+  it('jede Bauform in jedem Stil, jeder Palette und Größe ist gültig', () => {
+    const errs: string[] = []
+    for (const st of STYLES)
+      for (const form of st.forms)
+        for (const pal of st.palettes)
+          for (const size of SIZES)
+            for (const seed of [0, 7]) errs.push(...check({ generator: 'haus', version: 2, seed, params: { style: st.id, palette: pal, size, form } }).map(e => `${st.id}/${form}: ${e}`))
+    expect(errs.slice(0, 8)).toEqual([])
+  }, 60000)
+  it('Varianten unterscheiden sich in der Form, nicht nur im Material', () => {
+    for (const st of STYLES) {
+      const shapes = new Set(st.forms.map(form => {
+        const bp = buildFromSource({ generator: 'haus', version: 2, seed: 11, params: { style: st.id, palette: st.palettes[0], size: 'M', form } })
+        return `${bp.size.join('x')}`
+      }))
+      expect(shapes.size, st.id).toBeGreaterThanOrEqual(Math.min(3, st.forms.length))
+    }
+  })
   it('Natur ist gültig, Laub zerfällt nicht', () => {
     const errs: string[] = []
     for (const sp of SPECIES) for (const size of SIZES) for (const seed of [0, 1, 2]) errs.push(...check({ generator: 'baum', version: 1, seed, params: { species: sp.id, size } }))
@@ -117,8 +135,8 @@ describe('Generatoren: alle Stile, Paletten, Größen, Varianten', () => {
     const sizes = new Set([0, 1, 2, 3, 4, 5].map(seed => buildFromSource({ ...src, seed }).size.join('x') + buildFromSource({ ...src, seed }).count()))
     expect(sizes.size).toBeGreaterThan(1)
   })
-  it('Fundament folgt dem Hang, ersetzt aber nie Gelände unter dem Geländeblock', () => {
-    const src: BlueprintSource = { generator: 'haus', version: 1, seed: 2, params: { style: 'mittelalter', palette: 'mittel-fichte', size: 'M' } }
+  it.each(['rechteck', 'winkel', 'zwerchgiebel', 'turm', 'anbau', 'doppel'])('Fundament (%s) folgt dem Hang, ersetzt aber nie Gelände unter dem Geländeblock', form => {
+    const src: BlueprintSource = { generator: 'haus', version: 2, seed: 2, params: { style: 'mittelalter', palette: 'mittel-fichte', size: 'M', form } }
     const e = CATALOG.find(c => c.id === 'haus')!.ground!(src)!
     const w = e.x1 - e.x0 + 1, d = e.z1 - e.z0 + 1
     const h = Array.from({ length: w * d }, (_, i) => -Math.floor((i % w) / 3)) // fällt nach Osten ab

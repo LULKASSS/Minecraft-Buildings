@@ -4,8 +4,8 @@
 import type { Vec3 } from '../blueprint/blueprint'
 import { boundsOf, layersOf, overlaps, place, type Bounds, type Layer, type Placed, type Placement } from '../blueprint/placement'
 import type { Rotation } from '../blueprint/transform'
-import { buildFromSource, type Category } from '../catalog'
-import type { Size } from '../catalog/styles'
+import { buildFromSource, entryOf, type Category } from '../catalog'
+import { styleById, type HouseForm, type Size } from '../catalog/styles'
 import type { Mix, Species } from '../catalog/nature'
 import { setCustomPalettes, type Palette } from '../style/palettes'
 import type { BlueprintSource } from '../blueprint/blueprint'
@@ -35,6 +35,10 @@ export interface BuildChoice {
   mix: Mix
   templateId: string | null
   facade: boolean
+  /** Bauform des Hauses; 'alle' = jede Variante eine andere */
+  form: HouseForm | 'alle'
+  /** bei 'alle': mit welcher Form die erste Variante beginnt (wechselt beim Würfeln) */
+  formOffset: number
   seeds: number[]
   pick: number
 }
@@ -66,26 +70,35 @@ export interface State {
 
 export const DEMO_DATA_VERSION = 4786 // 26.1
 
+export const VARIANTS = 6
+
 export function newSeeds(): number[] {
-  return [0, 1, 2].map(() => Math.floor(Math.random() * 1e6))
+  return Array.from({ length: VARIANTS }, () => Math.floor(Math.random() * 1e6))
+}
+
+/** Bauform der Variante i: fest gewählt oder bei 'alle' reihum, damit jede Variante anders aussieht. */
+export function formOf(b: BuildChoice, i: number): HouseForm {
+  const forms = styleById(b.style).forms
+  if (b.form !== 'alle' && forms.includes(b.form)) return b.form
+  return forms[(b.formOffset + i) % forms.length]
 }
 
 /** Name für ein neues Bauwerk aus der Auswahl, z. B. "Haus" oder "Kirsche". */
 export function placementLabel(b: BuildChoice = S.build): string {
   if (b.cat === 'natur') return b.type === 'baum' ? SPECIES_LABEL[b.species] : b.type === 'pinsel' ? MIX_LABEL[b.mix] : b.type === 'busch' ? 'Busch' : 'Fels'
   if (b.cat === 'vorlage') return 'Vorlage'
-  return ({ haus: 'Haus', turm: 'Turm', brunnen: 'Brunnen', marktstand: 'Marktstand', laterne: 'Laterne' } as Record<string, string>)[b.type] ?? b.type
+  return entryOf(b.type).label
 }
 const SPECIES_LABEL: Record<Species, string> = { oak: 'Eiche', birch: 'Birke', spruce: 'Fichte', cherry: 'Kirsche', dark_oak: 'Dunkeleiche', acacia: 'Akazie' }
 const MIX_LABEL: Record<Mix, string> = { wald: 'Laubwald', nadelwald: 'Nadelwald', kirschhain: 'Kirschhain', wiese: 'Blumenwiese', savanne: 'Savanne', felsen: 'Felsen' }
 
 /** Quelle für das, was im Bauen-Feld gewählt ist (Variante = Seed). */
-export function choiceSource(b: BuildChoice = S.build, seed = b.seeds[b.pick]): BlueprintSource {
+export function choiceSource(b: BuildChoice = S.build, seed = b.seeds[b.pick], index = b.pick): BlueprintSource {
   const params: Record<string, unknown> =
     b.cat === 'natur' ? { size: b.size, species: b.species, mix: b.mix }
     : b.cat === 'vorlage' ? { templateId: b.templateId, ...(b.facade ? { facade: { palette: b.palette, sides: [true, true, true, true], roof: false } } : {}) }
-    : { style: b.style, palette: b.palette, size: b.size }
-  return { generator: b.type, version: 1, seed, params }
+    : { style: b.style, palette: b.palette, size: b.size, ...(b.type === 'haus' ? { form: formOf(b, index) } : {}) }
+  return { generator: b.type, version: b.type === 'haus' ? 2 : 1, seed, params }
 }
 
 function emptyProject(worldKey = '', worldName = '', dataVersion = DEMO_DATA_VERSION): Project {
@@ -101,7 +114,7 @@ export const S: State = {
   project: emptyProject(),
   sel: null,
   placing: null,
-  build: { cat: 'gebaeude', type: 'haus', style: 'mittelalter', palette: 'mittel-eiche', size: 'M', species: 'oak', mix: 'wald', templateId: null, facade: false, seeds: newSeeds(), pick: 0 },
+  build: { cat: 'gebaeude', type: 'haus', style: 'mittelalter', palette: 'mittel-putz', size: 'M', species: 'oak', mix: 'wald', templateId: null, facade: false, form: 'alle', formOffset: 0, seeds: newSeeds(), pick: 0 },
   guide: { layer: null, single: false, playing: false, tab: 'layer' },
   savedFolder: null,
   textures: 'none',

@@ -4,7 +4,7 @@ import { boundsOf, type Placement } from '../blueprint/placement'
 import { blueprintMaterials } from '../blueprint/materials'
 import { buildFromSource, CATALOG, type Category } from '../catalog'
 import { MIXES, SPECIES } from '../catalog/nature'
-import { STYLES, type Size } from '../catalog/styles'
+import { HOUSE_FORMS, STYLES, type HouseForm, type Size } from '../catalog/styles'
 import { templateList } from '../catalog/template'
 import { thumbnail } from '../render/thumbs'
 import type { TexturedMesher } from '../render/textured'
@@ -141,12 +141,17 @@ const SIZE_LABEL: Record<Size, string> = { S: 'Klein', M: 'Mittel', L: 'Groß' }
 
 function chooser(a: SideActions): string {
   const c = b()
-  const cats: [Category, string][] = [['gebaeude', 'Gebäude'], ['natur', 'Natur'], ['vorlage', 'Vorlagen']]
+  const cats: [Category, string][] = [['gebaeude', 'Gebäude'], ['deko', 'Deko'], ['natur', 'Natur'], ['vorlage', 'Vorlagen']]
   let html = `<div class="seg wide" role="tablist" id="cat-seg">${cats.map(([id, l]) => `<button class="seg-btn" data-cat="${id}" aria-selected="${c.cat === id}">${l}</button>`).join('')}<span class="seg-thumb" aria-hidden="true"></span></div>`
   const types = CATALOG.filter(e => e.category === c.cat && !e.hidden && e.id !== 'vorlage')
   if (types.length) html += `<div class="chips">${types.map(t => chip('data-btype', t.id, t.label, c.type === t.id)).join('')}</div>`
 
-  if (c.cat === 'gebaeude' || (c.cat === 'vorlage' && c.facade)) {
+  const cur = CATALOG.find(e => e.id === c.type)
+  if (cur?.forms) {
+    const forms = STYLES.find(st => st.id === c.style)!.forms
+    html += `<div class="sub">Form</div><div class="chips">${chip('data-form', 'alle', 'Alle', c.form === 'alle')}${HOUSE_FORMS.filter(f => forms.includes(f.id)).map(f => chip('data-form', f.id, f.label, c.form === f.id)).join('')}</div>`
+  }
+  if (c.cat === 'gebaeude' || c.cat === 'deko' || (c.cat === 'vorlage' && c.facade)) {
     html += `<div class="sub">Stil</div><div class="chips">${STYLES.map(st => chip('data-style', st.id, st.label, c.style === st.id)).join('')}</div>`
     html += `<div class="sub">Palette</div><div class="pals">${palettesFor(c.style, customPalettes()).map(pal => paletteRow(pal, c.palette === pal.id, a)).join('')}</div>
       <button class="linkish small" data-act="learn">Palette aus der Umgebung lernen</button>`
@@ -154,7 +159,7 @@ function chooser(a: SideActions): string {
   if (c.cat === 'natur' && c.type === 'baum') html += `<div class="sub">Holzart</div><div class="chips">${SPECIES.map(sp => chip('data-species', sp.id, sp.label, c.species === sp.id)).join('')}</div>`
   if (c.cat === 'natur' && c.type === 'pinsel') html += `<div class="sub">Mischung</div><div class="chips">${MIXES.map(m => chip('data-mix', m.id, m.label, c.mix === m.id)).join('')}</div>`
   if (c.cat === 'vorlage') html += templatesBlock(a)
-  if (c.cat !== 'vorlage' && c.type !== 'laterne') {
+  if (c.cat !== 'vorlage' && cur?.sized !== false) {
     html += `<div class="sub">${c.type === 'pinsel' ? 'Fläche' : 'Größe'}</div><div class="chips">${(['S', 'M', 'L'] as Size[]).map(sz => chip('data-size', sz, c.type === 'pinsel' ? { S: '13 × 13', M: '21 × 21', L: '29 × 29' }[sz] : SIZE_LABEL[sz], c.size === sz)).join('')}</div>`
   }
   if (c.cat === 'vorlage' && !c.templateId) return html
@@ -178,10 +183,16 @@ function paletteRow(pal: Palette, on: boolean, a: SideActions): string {
 
 const thumbCache = new Map<string, { url: string; label: string }>()
 
+/** Bauform als Vorsatz in der Variantenzeile, z. B. „Winkelhaus · “ */
+function formLabel(src: { params: Record<string, unknown> }): string {
+  const f = HOUSE_FORMS.find(x => x.id === src.params.form)
+  return f ? `${f.label} · ` : ''
+}
+
 function variantsBlock(a: SideActions): string {
   const c = b()
   const cells = c.seeds.map((seed, i) => {
-    const src = choiceSource(c, seed)
+    const src = choiceSource(c, seed, i)
     const key = JSON.stringify(src) + (a.textured() ? 't' : 'f')
     let t = thumbCache.get(key)
     if (!t) {
@@ -191,7 +202,7 @@ function variantsBlock(a: SideActions): string {
         const total = rows.reduce((n, r) => n + r.count, 0)
         const cost = rows.reduce((n, r) => n + r.count * survivalCost(r.item), 0) / Math.max(1, total)
         const amount = total >= 1728 ? `${(total / 1728).toLocaleString('de-DE', { maximumFractionDigits: 1 })} Shulker` : `${Math.ceil(total / 64)} Stacks`
-        t = { url: thumbnail(bp, a.textured(), getComputedStyle(document.documentElement).getPropertyValue('--surface-2').trim() || '#eee'), label: `${amount} · ${cost < 1.6 ? 'günstig' : cost < 2.3 ? 'mittel' : 'aufwendig'}` }
+        t = { url: thumbnail(bp, a.textured(), getComputedStyle(document.documentElement).getPropertyValue('--surface-2').trim() || '#eee'), label: `${formLabel(src)}${amount} · ${cost < 1.6 ? 'günstig' : cost < 2.3 ? 'mittel' : 'aufwendig'}` }
       } catch (e) {
         t = { url: '', label: String((e as Error).message ?? e) }
       }
@@ -303,6 +314,7 @@ function bind(el: HTMLElement, a: SideActions): void {
       case 'start-place': return a.startPlacing(S.build.type)
       case 'reroll':
         S.build.seeds = newSeeds()
+        S.build.formOffset = (S.build.formOffset + 1) % 6
         S.build.pick = 0
         return update()
       case 'learn': return a.learnPalette()
@@ -344,6 +356,7 @@ function bind(el: HTMLElement, a: SideActions): void {
     S.placing = null
   })
   choose('data-btype', v => (S.build.type = v))
+  choose('data-form', v => (S.build.form = v as HouseForm | 'alle'))
   choose('data-style', v => {
     S.build.style = v
     S.build.palette = STYLES.find(s => s.id === v)!.palettes[0]

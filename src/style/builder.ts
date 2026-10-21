@@ -120,12 +120,21 @@ export class Builder {
 
   /** Form (Treppe, Stufe, Zaun …) im Material einer Rolle; fällt auf den Hauptblock der Rolle zurück. */
   form(x: number, y: number, z: number, role: Role, form: Form, props: Props = {}): void {
-    const id = this.id(role, x, y, z)
     // Ausweichen, wenn das Material die Form nicht hat (z. B. glatter Stein ohne Treppe)
+    this.set(x, y, z, this.formState(role, form, props, x, y, z))
+  }
+
+  /** Zustand einer Form an einer Stelle, ohne ihn zu setzen (für soft). */
+  formState(role: Role, form: Form, props: Props, x: number, y: number, z: number): BlockState {
+    const id = this.id(role, x, y, z)
     const fallback: Role[] = role === 'trim' ? ['roof', 'sockel'] : role === 'detail' ? ['trim', 'roof'] : ['sockel', 'wall']
     const b = formOf(id, form) ?? formOf(this.main(role), form) ?? fallback.map(r => formOf(this.main(r), form)).find(Boolean)
     if (!b) throw new Error(`${this.main(role)} hat keine Form ${form}`)
-    this.set(x, y, z, withProps(b, props))
+    return withProps(b, props)
+  }
+
+  beamState(role: Role, axis: 'x' | 'y' | 'z', x: number, y: number, z: number): BlockState {
+    return withProps(this.id(role, x, y, z), { axis })
   }
 
   /** Stamm oder Balken: setzt die Achse, falls der Block eine hat. */

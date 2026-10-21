@@ -7,8 +7,9 @@ import { buildHouse, houseGroundExtent } from './house'
 import { buildBush, buildRock, buildScatter, buildTree, scatterExtent } from './nature'
 import { buildLamp, buildStall, buildTower, buildWell, stallExtent, towerExtent, wellExtent } from './small'
 import { buildTemplate, templateExtent } from './template'
+import { DEKO } from './deko'
 
-export type Category = 'gebaeude' | 'natur' | 'vorlage'
+export type Category = 'gebaeude' | 'deko' | 'natur' | 'vorlage'
 
 export interface Extent {
   x0: number
@@ -26,6 +27,10 @@ export interface CatalogEntry {
   styled: boolean
   /** Varianten über den Seed */
   seeded: boolean
+  /** S/M/L ändert etwas (Standard: ja) */
+  sized?: boolean
+  /** Bauform wählbar (Haus) */
+  forms?: boolean
   /** Für welche Fläche der Generator Geländehöhen braucht (lokal, relativ zum Anker) */
   ground?: (source: BlueprintSource) => Extent | null
   build(source: BlueprintSource): Blueprint
@@ -33,11 +38,13 @@ export interface CatalogEntry {
 }
 
 export const CATALOG: CatalogEntry[] = [
-  { id: 'haus', label: 'Haus', category: 'gebaeude', kind: 'decorative', styled: true, seeded: true, ground: houseGroundExtent, build: buildHouse },
+  { id: 'haus', label: 'Haus', category: 'gebaeude', kind: 'decorative', styled: true, seeded: true, forms: true, ground: houseGroundExtent, build: buildHouse },
   { id: 'turm', label: 'Turm', category: 'gebaeude', kind: 'decorative', styled: true, seeded: true, ground: towerExtent, build: buildTower },
   { id: 'brunnen', label: 'Brunnen', category: 'gebaeude', kind: 'decorative', styled: true, seeded: false, ground: wellExtent, build: buildWell },
-  { id: 'marktstand', label: 'Marktstand', category: 'gebaeude', kind: 'decorative', styled: true, seeded: false, ground: stallExtent, build: buildStall },
-  { id: 'laterne', label: 'Laterne', category: 'gebaeude', kind: 'decorative', styled: true, seeded: false, build: buildLamp },
+  { id: 'marktstand', label: 'Marktstand', category: 'deko', kind: 'decorative', styled: true, seeded: false, ground: stallExtent, build: buildStall },
+  ...DEKO.map((d): CatalogEntry => ({ id: d.id, label: d.label, category: 'deko', kind: 'decorative', styled: true, seeded: d.seeded, sized: d.sized, ground: d.ground, build: d.build })),
+  // alte Laterne bleibt baubar für gespeicherte Bauwerke, gewählt wird jetzt der Laternenpfahl
+  { id: 'laterne', label: 'Laterne', category: 'deko', kind: 'decorative', styled: true, seeded: false, build: buildLamp, hidden: true },
   { id: 'baum', label: 'Baum', category: 'natur', kind: 'decorative', styled: false, seeded: true, build: buildTree },
   { id: 'busch', label: 'Busch', category: 'natur', kind: 'decorative', styled: false, seeded: true, build: buildBush },
   { id: 'fels', label: 'Fels', category: 'natur', kind: 'decorative', styled: false, seeded: true, build: buildRock },
