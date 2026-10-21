@@ -87,8 +87,12 @@ async function build(src: Base): Promise<Omit<LoadedTextures, 'id'>> {
   canvas.height = img.height
   canvas.getContext('2d')!.putImageData(img, 0, 0)
   const texture = new THREE.CanvasTexture(canvas)
+  // Nah scharf (Nearest), in der Ferne Verkleinerungsstufen statt Pixelrauschen. Die Stufen entstehen selbst und nur bis
+  // 1 Pixel je Block (16 → 1): Jede Textur liegt auf einem 16er-Raster, so mischt sich keine mit ihrer Nachbarin.
+  texture.mipmaps = mipChain(img, 4)
   texture.magFilter = THREE.NearestFilter
-  texture.minFilter = THREE.NearestFilter
+  texture.minFilter = THREE.LinearMipmapLinearFilter
+  texture.anisotropy = 4
   texture.generateMipmaps = false
   texture.flipY = false
   texture.colorSpace = THREE.SRGBColorSpace
@@ -211,6 +215,32 @@ function faceVertsLocal(face: (typeof DIRS)[number], x0: number, y0: number, z0:
 }
 
 /** Kartenfarbe je Block: Mittelwert der Textur auf der Oberseite, mit Biom-Standardtönung. */
+/** Stufe 0 … levels, jeweils halbe Größe; Farbe nach Deckkraft gewichtet, damit Laubränder nicht dunkel werden. */
+function mipChain(img: ImageData, levels: number): ImageData[] {
+  const out = [img]
+  for (let l = 1; l <= levels; l++) {
+    const src = out[l - 1]
+    const w = src.width >> 1, h = src.height >> 1
+    if (w < 1 || h < 1) break
+    const dst = new ImageData(w, h)
+    const a = src.data, d = dst.data, sw = src.width
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        let r = 0, g = 0, b = 0, al = 0
+        for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+          const i = ((y * 2 + dy) * sw + x * 2 + dx) * 4
+          const k = a[i + 3]
+          r += a[i] * k; g += a[i + 1] * k; b += a[i + 2] * k; al += k
+        }
+        const o = (y * w + x) * 4
+        if (al) { d[o] = r / al; d[o + 1] = g / al; d[o + 2] = b / al }
+        d[o + 3] = al / 4
+      }
+    out.push(dst)
+  }
+  return out
+}
+
 function mapColors(defs: Map<string, BlockDefinition>, provider: { getBlockModel(id: Identifier): BlockModel | null }, atlas: TextureAtlas, img: ImageData): Record<string, RGB> {
   const out: Record<string, RGB> = {}
   for (const [name, def] of defs) {
