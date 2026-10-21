@@ -1,8 +1,10 @@
 // Chunk-Format ab 1.18 (gilt so auch in 26.x): sections[] mit block_states {palette, data}, Heightmaps.
 // Ältere Chunks (mit "Level"-Tag) erkennt die App, liest sie aber nicht.
+// Ab 26.3 (Snapshot 7) sieht die Palette anders aus, siehe paletteEntry.
 
 import { AIR, formatState, isAir, type BlockState } from '../blueprint/blockstate'
-import { readNbt, unpackAligned, type NbtObject } from './nbt-fast'
+import { withDefaults } from './block-defaults'
+import { readNbt, unpackAligned, type NbtObject, type NbtValue } from './nbt-fast'
 
 export interface Section {
   palette: BlockState[]
@@ -54,10 +56,7 @@ export function decodeChunk(bytes: Uint8Array): ChunkResult {
   for (const s of rawSections) {
     const bs = s.block_states as NbtObject | undefined
     if (!bs) continue
-    const pal = ((bs.palette as NbtObject[]) ?? []).map(e => {
-      const props = (e.Properties as Record<string, string> | undefined) ?? {}
-      return formatState(String(e.Name), props)
-    })
+    const pal = ((bs.palette as NbtValue[]) ?? []).map(paletteEntry)
     if (pal.length === 0) continue
     const sec: Section = { palette: pal, data: null }
     if (pal.length > 1 && bs.data instanceof Int32Array) {
@@ -97,6 +96,21 @@ export function decodeChunk(bytes: Uint8Array): ChunkResult {
     computeSurface(chunk)
   }
   return { ok: true, chunk }
+}
+
+/**
+ * Ein Palette-Eintrag. Bis 26.2: {Name, Properties}. Ab 26.3 drei Formen: nur Text ("minecraft:stone", wenn kein
+ * Block im Abschnitt einen gespeicherten Zustand hat), {"": "minecraft:stone"} (dieser Block ohne, andere mit Zustand)
+ * und {id, properties}. Fehlende Properties heißen Standardzustand. Nicht neu gespeicherte Chunks bleiben im alten Format.
+ */
+export function paletteEntry(e: NbtValue): BlockState {
+  if (typeof e === 'string') return withDefaults(e)
+  if (!e || typeof e !== 'object' || Array.isArray(e) || ArrayBuffer.isView(e)) return AIR
+  const o = e as NbtObject
+  const name = o.id ?? o.Name ?? o['']
+  if (typeof name !== 'string' || !name) return AIR
+  const props = (o.properties ?? o.Properties) as Record<string, string> | undefined
+  return o.Name !== undefined && props ? formatState(name, props) : withDefaults(name, props)
 }
 
 /** Oberster Block einer Spalte (+1), leere Abschnitte werden übersprungen. */

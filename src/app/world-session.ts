@@ -50,7 +50,8 @@ interface Slot { w: Worker; job: Job | null }
 const JOB_TIMEOUT = 120_000
 const MAX_BITMAPS = 48 // je 1 MB; weiter entfernte Kacheln werden aus dem PNG neu erzeugt
 // 4: Höhen gegengeprüft (Fassung 8) – ältere Kacheln im Speicher hatten falsche Höhen
-const CACHE_VERSION = 4
+// 5: Palette ab 26.3 – vorher war in 26.3-Welten jeder Block „undefined“ (alles bebaut, Oberkante Y 320)
+const CACHE_VERSION = 5
 
 class Pool {
   private slots: Slot[] = []

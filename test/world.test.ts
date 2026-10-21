@@ -1,7 +1,7 @@
 import { BlobWriter, Uint8ArrayReader, ZipWriter } from '@zip.js/zip.js'
 import { describe, expect, it } from 'vitest'
 import { areaGet, readArea, UNDERGROUND } from '../src/world/area'
-import { blockAt, decodeChunk, heightmapBits } from '../src/world/chunk'
+import { blockAt, decodeChunk, heightmapBits, paletteEntry } from '../src/world/chunk'
 import { openWorld, parseLevel } from '../src/world/level'
 import { readChunkBytes, readHeader } from '../src/world/region'
 import { findWorldRoot, UploadSource, ZipSource, type WorldSource } from '../src/world/source'
@@ -230,6 +230,30 @@ describe('Minecraft-Ordner', () => {
         expect(r.chunk.surface[x + z * 16], `Verschiebung ${shift}`).toBe(top + 1)
       }
     }
+  })
+  it('Palette ab 26.3 (Text-Liste, {"": id}, {id, properties}) liest dieselben Blöcke wie das alte Format', () => {
+    const alt = decodeChunk(makeChunk(2, 3))
+    const neu = decodeChunk(makeChunk(2, 3, testBlock, 4786, undefined, 0, true))
+    expect(alt.ok && neu.ok).toBe(true)
+    if (!alt.ok || !neu.ok) return
+    let leaves = 0
+    for (let y = -64; y < 160; y += 1)
+      for (const [x, z] of [[0, 0], [5, 11], [15, 15], [8, 2]]) {
+        const a = blockAt(alt.chunk, x, y, z)
+        expect(blockAt(neu.chunk, x, y, z), `${x},${y},${z}`).toBe(a)
+        if (a.includes('leaves')) leaves++
+      }
+    expect(Array.from(neu.chunk.surface)).toEqual(Array.from(alt.chunk.surface))
+    expect(leaves).toBeGreaterThan(0)
+  })
+  it('Palette-Einträge: Standardzustand wird ergänzt, altes Format bleibt', () => {
+    expect(paletteEntry('minecraft:oak_stairs')).toBe('minecraft:oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=false]')
+    expect(paletteEntry({ '': 'minecraft:stone' })).toBe('minecraft:stone')
+    expect(paletteEntry({ id: 'minecraft:oak_stairs', properties: { facing: 'east' } })).toBe('minecraft:oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]')
+    expect(paletteEntry({ id: 'minecraft:grass_block' })).toBe('minecraft:grass_block[snowy=false]')
+    expect(paletteEntry({ Name: 'minecraft:oak_log', Properties: { axis: 'x' } })).toBe('minecraft:oak_log[axis=x]')
+    expect(paletteEntry({ Name: 'minecraft:stone' })).toBe('minecraft:stone')
+    expect(paletteEntry({})).toBe('minecraft:air')
   })
   it('Heightmap-Bitbreite aus der Zahl der Longs (384 Blöcke hoch → 9 Bit)', () => {
     expect(heightmapBits(37)).toBe(9)

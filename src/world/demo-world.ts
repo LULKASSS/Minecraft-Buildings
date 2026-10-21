@@ -82,9 +82,42 @@ function stateTag(s: string): NbtCompound {
   return c
 }
 
+// Standardzustände der Blöcke aus testBlock (wie in data/blocks-26.1.json); hier fest, weil die Datei auch
+// ohne Bundler läuft (test/welt-ordner.mjs)
+const DEMO_DEFAULTS: Record<string, Record<string, string>> = {
+  'minecraft:grass_block': { snowy: 'false' },
+  'minecraft:water': { level: '0' },
+  'minecraft:oak_log': { axis: 'y' },
+  'minecraft:oak_leaves': { distance: '7', persistent: 'false', waterlogged: 'false' },
+}
+
+/** Palette wie ab 26.3: Text-Liste, wenn kein Block einen gespeicherten Zustand hat, sonst {"": id} bzw. {id, properties}. */
+function paletteTag(palette: string[]): NbtList {
+  const parsed = palette.map(s => {
+    const m = /^([^[]+)(?:\[(.*)\])?$/.exec(s)!
+    const props: Record<string, string> = {}
+    for (const kv of m[2] ? m[2].split(',') : []) {
+      const [k, v] = kv.split('=')
+      props[k] = v
+    }
+    // Standardzustand wird wie im Spiel nur als ID gespeichert
+    const d = DEMO_DEFAULTS[m[1]] ?? {}
+    const isDefault = Object.keys(props).every(k => d[k] === props[k])
+    return { id: m[1], props: isDefault ? null : props }
+  })
+  if (parsed.every(p => !p.props)) return new NbtList(parsed.map(p => new NbtString(p.id)), 8)
+  return new NbtList(parsed.map(p => {
+    if (!p.props) return new NbtCompound().set('', new NbtString(p.id))
+    const c = new NbtCompound()
+    for (const [k, v] of Object.entries(p.props)) c.set(k, new NbtString(v))
+    return new NbtCompound().set('id', new NbtString(p.id)).set('properties', c)
+  }), 10)
+}
+
 /** secs: nur diese Abschnitte schreiben (für große Testwelten, die schnell entstehen sollen) */
 /** hmShift: Heightmap absichtlich verschieben (wie in alten, übernommenen Chunks), um das Gegenprüfen zu testen */
-export function makeChunk(cx: number, cz: number, block = testBlock, dataVersion = 4786, secs: [number, number] = [MIN_SEC, MIN_SEC + SECTIONS - 1], hmShift = 0): Uint8Array {
+/** neu: Palette im Format ab 26.3 schreiben */
+export function makeChunk(cx: number, cz: number, block = testBlock, dataVersion = 4786, secs: [number, number] = [MIN_SEC, MIN_SEC + SECTIONS - 1], hmShift = 0, neu = false): Uint8Array {
   const sections: NbtCompound[] = []
   const surface: number[] = []
   for (let z = 0; z < 16; z++)
@@ -106,7 +139,7 @@ export function makeChunk(cx: number, cz: number, block = testBlock, dataVersion
           if (i < 0) { i = palette.length; palette.push(s) }
           idx.push(i)
         }
-    const bs = new NbtCompound().set('palette', new NbtList(palette.map(stateTag), 10))
+    const bs = new NbtCompound().set('palette', neu ? paletteTag(palette) : new NbtList(palette.map(stateTag), 10))
     if (palette.length > 1) bs.set('data', new NbtLongArray(packAligned(idx, Math.max(4, Math.ceil(Math.log2(palette.length))))))
     sections.push(new NbtCompound().set('Y', new NbtByte(sy)).set('block_states', bs))
   }
@@ -166,7 +199,8 @@ export function makeLevelDat(name = 'Testwelt', dataVersion = 4786, lastPlayed =
   return new NbtFile('', new NbtCompound().set('Data', data), 'gzip', false, undefined).write()
 }
 
-/** Große Testwelt für Ladeproben: n × n volle Regionen ab 0,0, nur Abschnitte von Y 32 bis 111. */
+/** Große Testwelt für Ladeproben: n × n volle Regionen ab 0,0, nur Abschnitte von Y 32 bis 111.
+ *  Gemischt wie eine auf 26.3 gehobene Welt: jeder zweite Streifen von 8 Chunks mit der neuen Palette. */
 export function makeBigWorld(n = 2, name = 'Große Testwelt', hmShift = 0): Map<string, Uint8Array> {
   const files = new Map<string, Uint8Array>()
   files.set('level.dat', makeLevelDat(name))
@@ -174,13 +208,13 @@ export function makeBigWorld(n = 2, name = 'Große Testwelt', hmShift = 0): Map<
   for (let rz = 0; rz < n; rz++)
     for (let rx = 0; rx < n; rx++) {
       const cs: { lx: number; lz: number; nbt: Uint8Array }[] = []
-      for (let lz = 0; lz < 32; lz++) for (let lx = 0; lx < 32; lx++) cs.push({ lx, lz, nbt: makeChunk(rx * 32 + lx, rz * 32 + lz, testBlock, 4786, [2, 6], (lx >> 3) % 2 ? hmShift : 0) })
+      for (let lz = 0; lz < 32; lz++) for (let lx = 0; lx < 32; lx++) cs.push({ lx, lz, nbt: makeChunk(rx * 32 + lx, rz * 32 + lz, testBlock, 4786, [2, 6], (lx >> 3) % 2 ? hmShift : 0, (lz >> 3) % 2 === 1) })
       files.set(`${dir}/r.${rx}.${rz}.mca`, makeRegion(cs))
     }
   return files
 }
 
-/** Ganze Testwelt: Pfad → Inhalt. Region 0,0 mit chunks × chunks Chunks, Region -1,0 mit 2×8 Chunks (negative x). */
+/** Ganze Testwelt: Pfad → Inhalt. Region 0,0 mit chunks × chunks Chunks, Region -1,0 mit 2×8 Chunks (negative x, Palette wie ab 26.3). */
 export function makeWorld(chunks = 8): Map<string, Uint8Array> {
   const files = new Map<string, Uint8Array>()
   files.set('level.dat', makeLevelDat())
@@ -189,7 +223,7 @@ export function makeWorld(chunks = 8): Map<string, Uint8Array> {
   for (let lz = 0; lz < chunks; lz++) for (let lx = 0; lx < chunks; lx++) r00.push({ lx, lz, nbt: makeChunk(lx, lz) })
   files.set(`${dir}/r.0.0.mca`, makeRegion(r00))
   const rm10: { lx: number; lz: number; nbt: Uint8Array }[] = []
-  for (let lz = 0; lz < 8; lz++) for (let lx = 30; lx < 32; lx++) rm10.push({ lx, lz, nbt: makeChunk(lx - 32, lz) })
+  for (let lz = 0; lz < 8; lz++) for (let lx = 30; lx < 32; lx++) rm10.push({ lx, lz, nbt: makeChunk(lx - 32, lz, testBlock, 4786, undefined, 0, true) })
   files.set(`${dir}/r.-1.0.mca`, makeRegion(rm10))
   return files
 }
