@@ -12,7 +12,7 @@ export interface StyledParams {
   ground?: Ground
 }
 
-function setup(source: BlueprintSource) {
+export function setup(source: BlueprintSource) {
   const p = source.params as unknown as StyledParams
   const st = styleById(p.style)
   const pal = getPalette(p.palette) ?? getPalette(st.palettes[0])!
@@ -22,14 +22,14 @@ function setup(source: BlueprintSource) {
 }
 
 /** Gelände unter einer Fläche auffüllen (nur über dem Geländeblock, nie darunter). */
-function foundation(b: Builder, g: Ground | undefined, cells: [number, number][]): void {
+export function foundation(b: Builder, g: Ground | undefined, cells: [number, number][]): void {
   for (const [x, z] of cells) {
     const gy = Math.max(-10, groundAt(g, x, z))
     for (let y = gy + 1; y < 0; y++) b.role(x, y, z, 'sockel', {}, 1)
   }
 }
 
-function facingTo(dx: number, dz: number): Facing {
+export function facingTo(dx: number, dz: number): Facing {
   return Math.abs(dx) >= Math.abs(dz) ? (dx > 0 ? 'east' : 'west') : dz > 0 ? 'south' : 'north'
 }
 
@@ -115,35 +115,114 @@ export function buildTower(source: BlueprintSource): Blueprint {
 
 // ---------- Brunnen ----------
 
-export function wellExtent() {
-  return { x0: -3, z0: -3, x1: 3, z1: 3 }
+const WELL: Record<Size, number> = { S: 2, M: 3, L: 4 }
+
+export function wellExtent(source?: BlueprintSource) {
+  const R = WELL[((source?.params as unknown as StyledParams | undefined)?.size) ?? 'M'] + 2
+  return { x0: -R, z0: -R, x1: R, z1: R }
+}
+
+/** Achteck mit Halbmesser R (Ecken abgeschnitten); Modern bleibt eckig. */
+function octagon(R: number, square: boolean): (x: number, z: number) => boolean {
+  return (x, z) => Math.abs(x) <= R && Math.abs(z) <= R && (square || Math.abs(x) + Math.abs(z) <= R + Math.ceil(R / 2))
 }
 
 export function buildWell(source: BlueprintSource): Blueprint {
-  const { st, b, g } = setup(source)
+  const { p, st, b, g } = setup(source)
+  const R = WELL[p.size]
+  const square = st.id === 'modern' || st.id === 'japan'
+  const inBasin = octagon(R, square), inPave = octagon(R + 1, square)
   const cells: [number, number][] = []
-  for (let z = -2; z <= 2; z++) for (let x = -2; x <= 2; x++) cells.push([x, z])
+  for (let z = -R - 1; z <= R + 1; z++) for (let x = -R - 1; x <= R + 1; x++) if (inPave(x, z)) cells.push([x, z])
   foundation(b, g, cells)
+  const rim = (x: number, z: number) => inBasin(x, z) && (!inBasin(x + 1, z) || !inBasin(x - 1, z) || !inBasin(x, z + 1) || !inBasin(x, z - 1))
+  // Becken: Steinkante, Wasser zwei tief, Pflaster ringsum
   for (const [x, z] of cells) {
-    const ring = Math.abs(x) === 2 || Math.abs(z) === 2
-    if (ring) {
+    if (!inBasin(x, z)) b.role(x, 0, z, 'path')
+    else if (rim(x, z)) {
       b.role(x, 0, z, 'sockel', {}, 1)
-      b.form(x, 1, z, 'sockel', 'slab', { type: 'bottom' })
-    } else b.set(x, 0, z, 'minecraft:water[level=0]')
+      if (st.id === 'wueste') {
+        b.role(x, 1, z, 'sockel', {}, 0)
+        b.form(x, 2, z, 'trim', 'slab', { type: 'bottom' })
+      } else if (st.id === 'modern') b.form(x, 1, z, 'trim', 'slab', { type: 'bottom' })
+      else b.form(x, 1, z, 'sockel', 'stairs', { facing: facingTo(-x, -z), half: 'bottom' })
+    } else {
+      b.set(x, 0, z, 'minecraft:water[level=0]')
+      b.set(x, -1, z, 'minecraft:water[level=0]')
+      b.role(x, -2, z, 'sockel', {}, 0)
+    }
   }
-  for (const [x, z] of [[-2, -2], [2, -2], [-2, 2], [2, 2]]) for (let y = 1; y <= 3; y++) b.form(x, y, z, 'detail', 'fence')
-  // kleines Walmdach
-  for (let i = 0; i < 4; i++) {
-    const a = 3 - i
-    for (let z = -a; z <= a; z++)
-      for (let x = -a; x <= a; x++) {
-        if (Math.abs(x) !== a && Math.abs(z) !== a) continue
-        if (a === 0) b.form(x, 4 + i, z, 'trim', 'slab', { type: 'bottom' })
-        else b.form(x, 4 + i, z, i === 0 ? 'trim' : 'roof', 'stairs', { facing: facingTo(-x, -z), half: 'bottom' })
+  const light = b.main('light')
+
+  if (st.id === 'modern') {
+    // Springbrunnen: Säule in der Mitte, oben quillt Wasser heraus
+    for (let y = -1; y <= 2; y++) b.role(0, y, 0, 'trim')
+    b.set(0, 3, 0, 'minecraft:water[level=0]')
+    for (const [x, z] of [[-R - 1, -R - 1], [R + 1, -R - 1], [-R - 1, R + 1], [R + 1, R + 1]] as [number, number][]) {
+      b.role(x, 1, z, 'trim')
+      b.set(x, 2, z, `${light}[hanging=false]`)
+    }
+    return b.toBlueprint(`Springbrunnen (${st.label})`, source)
+  }
+
+  if (st.id === 'wueste') {
+    // vier Pfeiler, Sonnendach aus Stoff in Streifen, Laterne darunter
+    const accents = b.palette!.roles.accent.map(a => a.id)
+    for (const [x, z] of [[-R, 0], [R, 0], [0, -R], [0, R]] as [number, number][]) {
+      b.role(x, 2, z, 'sockel', {}, 0)
+      for (let y = 3; y <= 4; y++) b.role(x, y, z, 'wall', {}, 0)
+    }
+    for (let z = -R; z <= R; z++)
+      for (let x = -R; x <= R; x++) {
+        if (!inBasin(x, z)) continue
+        b.set(x, 5, z, `minecraft:${accents[(x + R) % accents.length]}`)
+        if (rim(x, z)) b.form(x, 6, z, 'trim', 'slab', { type: 'bottom' })
       }
+    b.set(0, 4, 0, `${light}[hanging=true]`)
+    b.set(R + 1, 1, R + 1 - Math.ceil(R / 2), 'minecraft:potted_cactus')
+    return b.toBlueprint(`Brunnen (${st.label})`, source)
   }
-  for (let y = 4; y <= 6; y++) b.set(0, y, 0, 'minecraft:iron_chain[axis=y]')
-  b.set(0, 3, 0, `${b.main('light')}[hanging=true]`)
+
+  // Pfosten auf der Kante, Firstbalken, Satteldach (Japan: flache Stufen mit hochgezogenen Ecken).
+  // Dach schmal und hoch genug, damit man Becken und Winde sieht.
+  const japan = st.id === 'japan'
+  const top = 6 // Firstbalken
+  for (const x of [-R, R]) {
+    b.role(x, 1, 0, 'sockel', {}, 0)
+    for (let y = 2; y < top; y++) b.beam(x, y, 0, 'frame', 'y')
+  }
+  for (let x = -R - 1; x <= R + 1; x++) b.beam(x, top, 0, 'frame', 'x')
+  const half = 2
+  for (let x = -R - 1; x <= R + 1; x++) {
+    b.form(x, top + 1, 0, 'trim', 'slab', { type: 'bottom' })
+    for (let k = 1; k <= half; k++) {
+      if (japan) {
+        b.form(x, top, -k, k === half ? 'trim' : 'roof', 'slab', { type: k === half ? 'bottom' : 'top' })
+        b.form(x, top, k, k === half ? 'trim' : 'roof', 'slab', { type: k === half ? 'bottom' : 'top' })
+      } else {
+        b.form(x, top + 1 - k, -k, k === half ? 'trim' : 'roof', 'stairs', { facing: 'south', half: 'bottom' })
+        b.form(x, top + 1 - k, k, k === half ? 'trim' : 'roof', 'stairs', { facing: 'north', half: 'bottom' })
+      }
+    }
+  }
+  if (japan) for (const x of [-R - 1, R + 1]) for (const z of [-half, half]) b.form(x, top, z, 'trim', 'slab', { type: 'top' })
+  // Laternen unter den Balkenenden
+  b.set(-R - 1, top - 1, 0, `${light}[hanging=true]`)
+  b.set(R + 1, top - 1, 0, `${light}[hanging=true]`)
+  if (japan) {
+    // Bambusrohr als Wasserspeier (Tsukubai) statt Winde
+    b.set(0, 1, -R - 1, 'minecraft:stripped_bamboo_block[axis=y]')
+    b.set(0, 2, -R - 1, 'minecraft:stripped_bamboo_block[axis=y]')
+    b.set(0, 2, -R, 'minecraft:stripped_bamboo_block[axis=z]')
+    b.form(0, 3, -R - 1, 'trim', 'slab', { type: 'bottom' })
+  } else {
+    // Winde zwischen den Pfosten, Kette mit Eimer (Kessel) über dem Wasser
+    for (let x = -R + 1; x <= R - 1; x++) b.beam(x, top - 2, 0, 'frame', 'x')
+    const chain = st.id === 'steampunk' ? 'minecraft:copper_chain[axis=y]' : 'minecraft:iron_chain[axis=y]'
+    for (let y = 2; y < top - 2; y++) b.set(0, y, 0, chain)
+    b.set(0, 1, 0, 'minecraft:water_cauldron[level=3]')
+    if (st.id === 'steampunk') b.set(0, top + 2, 0, 'minecraft:lightning_rod[facing=up]')
+  }
   return b.toBlueprint(`Brunnen (${st.label})`, source)
 }
 
