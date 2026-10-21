@@ -86,7 +86,7 @@ function worldBlock(): string {
         <span class="small muted grow">${S.textures === 'ready' ? `Texturen aus ${esc(S.texturesFrom ?? 'der .jar')}` : S.textures === 'loading' ? esc(S.texturesFrom ?? 'Texturen werden gelesen …') : 'Einfarbig'}</span>
         ${S.textures === 'none' ? `<button class="btn small" data-act="textures">.jar wählen</button>` : ''}
       </div>
-      ${S.textures === 'none' ? `<p class="note muted" style="margin:6px 0 8px">Im Minecraft-Ordner liegt keine passende .jar (der Launcher lädt sie erst beim ersten Spielen).</p>
+      ${S.textures === 'none' ? `<p class="note muted" style="margin:6px 0 8px">Keine passende .jar gefunden. Am einfachsten: den ganzen ModrinthApp- oder Minecraft-Ordner wählen, dort liegt sie. Die App merkt sie sich danach.</p>
         <button class="btn accent" style="width:100%" data-act="mojang">${I.download}Texturen von Mojang laden (${esc(versionGuess())}, ca. 40 MB)</button>` : ''}
     </div>`
 }

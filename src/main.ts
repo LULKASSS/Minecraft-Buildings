@@ -251,6 +251,9 @@ async function useJar(f: File, from: string, quiet = false): Promise<boolean> {
     view3d.setTextures(texturesCache.mesher)
     mini.invalidate()
     update()
+    // .jar aus dem Ordner im Browser behalten: wer später nur das Profil oder die Welt wählt, hat trotzdem Texturen
+    const version = S.session?.info.versionName
+    if (version && !/gespeichert|von Mojang/.test(from)) void store.put('kv', `jar:${version}`, f).catch(e => console.warn('jar merken', e))
     return true
   } catch (e) {
     S.textures = 'none'
@@ -290,7 +293,11 @@ const actions: SideActions = {
     } catch (e) {
       S.textures = 'none'
       S.texturesFrom = null
-      toast(`Texturen konnten nicht von Mojang geladen werden (${(e as Error).message}). In der eingebetteten Vorschau kann das gesperrt sein – dann die App direkt öffnen oder die .jar wählen.`, true)
+      // „Failed to fetch“ heißt: Anfrage gar nicht rausgegangen (in der claude.ai-Vorschau vermutlich gesperrt)
+      const blocked = e instanceof TypeError
+      toast(blocked
+        ? 'Die Vorschau lässt den Download von Mojang nicht zu. Wähl einmal den ganzen ModrinthApp-Ordner (oder den Minecraft-Ordner) – die .jar von dort merkt sich die App, danach reicht auch das Profil.'
+        : `Texturen konnten nicht von Mojang geladen werden (${(e as Error).message}).`, true)
       update()
     }
   },
