@@ -41,6 +41,13 @@ export interface BuildChoice {
   formOffset: number
   seeds: number[]
   pick: number
+  /** Brücke: Breite in Blöcken und Deko (0 wenig, 1 normal, 2 viel) */
+  width: number
+  deco: number
+  /** Haus: Dachform ('alle' = der Seed entscheidet) */
+  roofShape: string
+  /** Reiter „Entwürfe“: gewählter gemerkter Entwurf */
+  draft: { name: string; source: BlueprintSource } | null
 }
 
 export type Selection = { kind: 'placement'; id: string } | null
@@ -57,6 +64,10 @@ export interface State {
   sel: Selection
   /** Bauwerk-Typ, der gerade in 3D an den Mauszeiger gehängt ist */
   placing: string | null
+  /** Höhe beim Setzen: dy über/unter dem anvisierten Block, oder fest gehaltenes Y */
+  placeAdjust: { dy: number; lockY: number | null }
+  /** Brücke setzen: bisher geklickte Punkte (Welt) */
+  path: Vec3[]
   build: BuildChoice
   guide: { layer: number | null; single: boolean; playing: boolean; tab: 'layer' | 'all' }
   savedFolder: string | null
@@ -86,6 +97,7 @@ export function formOf(b: BuildChoice, i: number): string | undefined {
 
 /** Name für ein neues Bauwerk aus der Auswahl, z. B. "Haus" oder "Kirsche". */
 export function placementLabel(b: BuildChoice = S.build): string {
+  if (b.cat === 'entwuerfe' && b.draft) return b.draft.name
   if (b.cat === 'natur') return b.type === 'baum' ? SPECIES_LABEL[b.species] : b.type === 'pinsel' ? MIX_LABEL[b.mix] : b.type === 'busch' ? 'Busch' : 'Fels'
   if (b.cat === 'vorlage') return 'Vorlage'
   return entryOf(b.type).label
@@ -95,11 +107,13 @@ const MIX_LABEL: Record<Mix, string> = { wald: 'Laubwald', nadelwald: 'Nadelwald
 
 /** Quelle für das, was im Bauen-Feld gewählt ist (Variante = Seed). */
 export function choiceSource(b: BuildChoice = S.build, seed = b.seeds[b.pick], index = b.pick): BlueprintSource {
+  if (b.cat === 'entwuerfe' && b.draft) return JSON.parse(JSON.stringify(b.draft.source)) as BlueprintSource
   const params: Record<string, unknown> =
     b.cat === 'natur' ? { size: b.size, species: b.species, mix: b.mix }
     : b.cat === 'vorlage' ? { templateId: b.templateId, ...(b.facade ? { facade: { palette: b.palette, sides: [true, true, true, true], roof: false } } : {}) }
-    : { style: b.style, palette: b.palette, size: b.size, ...(formOf(b, index) ? { form: formOf(b, index) } : {}) }
-  return { generator: b.type, version: b.type === 'haus' ? 2 : 1, seed, params }
+    : { style: b.style, palette: b.palette, size: b.size, ...(formOf(b, index) ? { form: formOf(b, index) } : {}), ...(b.type === 'bruecke' ? { width: b.width, deco: b.deco } : {}), ...(b.type === 'haus' && b.roofShape !== 'alle' ? { roofShape: b.roofShape } : {}) }
+  // Haus Version 3: Dachformen, Gauben, Balkon (Fassung 15); gesetzte Häuser mit Version 2 bleiben, wie sie sind
+  return { generator: b.type, version: b.type === 'haus' ? 3 : 1, seed, params }
 }
 
 function emptyProject(worldKey = '', worldName = '', dataVersion = DEMO_DATA_VERSION): Project {
@@ -115,7 +129,9 @@ export const S: State = {
   project: emptyProject(),
   sel: null,
   placing: null,
-  build: { cat: 'gebaeude', type: 'haus', style: 'mittelalter', palette: 'mittel-putz', size: 'M', species: 'oak', mix: 'wald', templateId: null, facade: false, form: 'alle', formOffset: 0, seeds: newSeeds(), pick: 0 },
+  placeAdjust: { dy: 0, lockY: null },
+  path: [],
+  build: { cat: 'gebaeude', type: 'haus', style: 'mittelalter', palette: 'mittel-putz', size: 'M', species: 'oak', mix: 'wald', templateId: null, facade: false, form: 'alle', formOffset: 0, seeds: newSeeds(), pick: 0, width: 5, deco: 1, roofShape: 'alle', draft: null },
   guide: { layer: null, single: false, playing: false, tab: 'layer' },
   savedFolder: null,
   textures: 'none',

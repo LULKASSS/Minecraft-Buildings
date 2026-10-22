@@ -150,3 +150,60 @@ describe('Brücke', () => {
     expect(errs).toEqual([])
   })
 })
+
+describe('Brücke über geklickte Punkte', () => {
+  // Fluss von x 3 … 12 quer zum ersten Wegstück, Ufer auf 0, Wasserspiegel −1
+  const g: Ground = (() => {
+    const x0 = -20, z0 = -20, w = 60, d = 50
+    const h: number[] = [], wet: number[] = []
+    for (let k = 0; k < d; k++)
+      for (let i = 0; i < w; i++) {
+        const x = x0 + i, water = x >= 3 && x <= 12
+        h.push(water ? -4 : 0)
+        if (water) wet.push(k * w + i)
+      }
+    return { x0, z0, w, d, h, wet, water: -1 }
+  })()
+  const path: [number, number][] = [[0, 0], [10, 0], [18, 8]]
+  const build = (form: string, width: number, deco: number) =>
+    buildBridge({ generator: 'bruecke', version: 1, seed: 4, params: { style: 'mittelalter', palette: 'mittel-putz', form, width, deco, path, ground: g } })
+
+  it('folgt dem Weg mit Knick, in jeder Bauart und Breite gültig', () => {
+    const errs: string[] = []
+    for (const f of bridgeForms('mittelalter'))
+      for (const width of [3, 5, 7, 9]) {
+        const bp = build(f.id, width, 1)
+        errs.push(...check(bp, `${f.id} ${width}`))
+        const [ax, , az] = bp.anchor
+        // entlang des ganzen Wegs liegt unter jedem Punkt etwas
+        for (const [s, A, B] of [[0, path[0], path[1]], [1, path[1], path[2]]] as const)
+          for (let u = 0; u <= 1; u += 0.1) {
+            const x = Math.round(A[0] + (B[0] - A[0]) * u) + ax, z = Math.round(A[1] + (B[1] - A[1]) * u) + az
+            let any = false
+            for (let y = 0; y < bp.size[1]; y++) if (bp.inside(x, y, z) && bp.get(x, y, z) !== 'minecraft:air') any = true
+            if (!any) errs.push(`${f.id} ${width}: Lücke im Wegstück ${s} bei ${x - ax},${z - az}`)
+          }
+      }
+    expect(errs.slice(0, 6)).toEqual([])
+  })
+  it('Breite und Deko ändern die Brücke', () => {
+    const across = (width: number) => {
+      const bp = build('balken', width, 1)
+      const [ax, , az] = bp.anchor
+      let n = 0
+      for (let z = 0; z < bp.size[2]; z++) {
+        let any = false
+        for (let y = 0; y < bp.size[1]; y++) if (bp.get(ax + 6, y, z) !== 'minecraft:air') any = true
+        if (any) n++
+      }
+      void az
+      return n
+    }
+    expect(across(3)).toBeLessThan(across(5))
+    expect(across(5)).toBeLessThan(across(9))
+    const has = (deco: number, re: RegExp) => build('bogen', 5, deco).palette.some(s => re.test(s))
+    expect(has(0, /lantern/)).toBe(false)
+    expect(has(1, /lantern/)).toBe(true)
+    expect(has(2, /potted/)).toBe(true)
+  })
+})

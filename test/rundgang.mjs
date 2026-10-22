@@ -189,6 +189,78 @@ async function handy() {
   await page.close()
 }
 
+// Fassung 15: Haus auf Woll-Grundriss, Brücke über Punkte, Leiste für Drehen/Höhe, Entwürfe
+async function fassung15() {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+  page.on('pageerror', e => fail(`f15: ${e.message}`))
+  await page.goto(`http://localhost:${PORT}/?demo`)
+  await page.locator('#side:not([hidden])').waitFor({ timeout: 10000 })
+  await warteAufLaden(page)
+  const screen = (x, y, z) => page.evaluate(([x, y, z]) => {
+    const s = window.__bp.view3d.scene, b = s.base
+    const v = s.camera.position.clone().set(x - b[0] + 0.5, y - b[1] + 0.99, z - b[2] + 0.5).project(s.camera)
+    const r = document.querySelector('#three canvas').getBoundingClientRect()
+    return [r.left + (v.x + 1) / 2 * r.width, r.top + (1 - v.y) / 2 * r.height]
+  }, [x, y, z])
+  const top = (x, z) => page.evaluate(([x, z]) => { for (let y = 120; y > 0; y--) { const t = window.__bp.view3d.terrainAt(x, y, z); if (t && !t.endsWith(':air')) return [y, t] } return null }, [x, z])
+
+  // Haus auf Wolle (Testwelt: L-förmiger Umriss bei x 80…96, z 112…120)
+  await page.evaluate(() => window.__bp.view3d.jumpTo(88, 116, 70))
+  await page.waitForTimeout(1200)
+  await warteAufLaden(page)
+  await page.click('[data-act="start-place"]')
+  if (await page.locator('#buildbar[hidden]').count()) fail('f15: beim Setzen keine Leiste für Drehen/Höhe')
+  let wool = null
+  for (const [x, z] of [[80, 116], [84, 112], [86, 120], [90, 113], [94, 120]]) {
+    const t = await top(x, z)
+    if (t?.[1].includes('wool')) { wool = [x, t[0], z]; break }
+  }
+  if (!wool) fail('f15: keine Wolle in der Testwelt gefunden')
+  else {
+    await page.mouse.move(...await screen(...wool))
+    await page.waitForTimeout(800)
+    await page.mouse.click(...await screen(...wool))
+    await page.waitForTimeout(800)
+    const p = await page.evaluate(() => window.__bp.S.project.placements.at(-1))
+    if (!p?.source.params.footprint) fail('f15: Klick auf Wolle setzt kein Haus auf den Grundriss')
+    await page.screenshot({ path: `${OUT}40-wolle.png` })
+    await page.click('[data-g="close"]')
+  }
+
+  // Brücke: Start, Knick, Ziel per Doppelklick
+  await page.evaluate(() => window.__bp.view3d.jumpTo(57, 70, 60))
+  await page.waitForTimeout(1200)
+  await warteAufLaden(page)
+  await page.click('[data-btype="bruecke"]')
+  await page.click('[data-act="start-place"]')
+  const pts = [[46, 64], [57, 63], [68, 70]]
+  for (const [i, [x, z]] of pts.entries()) {
+    const t = await top(x, z)
+    if (!t) { fail(`f15: Gelände bei ${x},${z} nicht geladen`); break }
+    const at = await screen(x, t[0], z)
+    await page.mouse.move(...at)
+    await page.waitForTimeout(300)
+    if (i < pts.length - 1) await page.mouse.click(...at)
+    else await page.mouse.dblclick(...at)
+    await page.waitForTimeout(300)
+  }
+  await page.waitForTimeout(800)
+  const br = await page.evaluate(() => window.__bp.S.project.placements.at(-1))
+  if (br?.source.generator !== 'bruecke' || (br.source.params.path?.length ?? 0) < 3) fail(`f15: Brücke nicht über die Punkte gesetzt (${JSON.stringify(br?.source.params.path)})`)
+  await page.screenshot({ path: `${OUT}41-bruecke.png` })
+  await page.click('[data-set-bw="7"]')
+  await page.waitForTimeout(500)
+  if ((await page.evaluate(() => window.__bp.S.project.placements.at(-1).source.params.width)) !== 7) fail('f15: Breite der Brücke lässt sich nicht ändern')
+
+  // Entwürfe: das gesetzte Haus vom Anfang ist nicht dabei (Ortsbezug), ein normal gesetztes schon
+  await page.click('[data-g="close"]')
+  await page.click('[data-btype="haus"]')
+  await page.locator('[data-star="0"]').click()
+  await page.click('[data-cat="entwuerfe"]')
+  if (!(await page.locator('[data-draft]').count())) fail('f15: Stern merkt keinen Entwurf')
+  await page.close()
+}
+
 // Wie im Claude-Artifact: eingebettet in eine fremde Seite, Ordner über die Dateiauswahl.
 async function eingebettet() {
   const host = createServer((_, res) => {
@@ -257,6 +329,7 @@ try {
     await run('dark', 1440, 900, false)
     await run('light', 1024, 768, false)
     await handy()
+    await fassung15()
     await eingebettet()
     await last()
     if (!process.env.OHNE_GALERIE) await galerie()

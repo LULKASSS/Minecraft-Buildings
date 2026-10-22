@@ -61,6 +61,8 @@ export class Scene3D {
   onClick: (a: (Aim & { face: Vec3 }) | null) => void = () => {}
   onMove: () => void = () => {}
   onMode: (m: CamMode) => void = () => {}
+  /** Doppelklick: true = erledigt (z. B. Brücke fertig), sonst hinfliegen */
+  onDouble: () => boolean = () => false
 
   constructor(readonly host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true })
@@ -141,7 +143,7 @@ export class Scene3D {
     })
     c.addEventListener('dblclick', e => {
       // Doppelklick: dorthin fliegen (auch auf die Ferne)
-      if (this.mode !== 'orbit') return
+      if (this.mode !== 'orbit' || this.onDouble()) return
       const r = c.getBoundingClientRect()
       const hit = this.pick(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), true)
       if (hit) this.glideTo(hit.point)

@@ -9,6 +9,7 @@ import { MIXES, SPECIES } from '../src/catalog/nature'
 import { STYLES, type Size } from '../src/catalog/styles'
 import { buildTemplate, readLitematic, registerTemplates } from '../src/catalog/template'
 import { writeLitematic } from '../src/export/litematic'
+import { isOpaqueCube } from '../src/render/shapes'
 import { complete, fixConnections, fixStairShapes, formOf, stemOf, survivalCost } from '../src/style/blocks'
 import type { Ground } from '../src/style/builder'
 import { learnPalette } from '../src/style/learn'
@@ -111,6 +112,53 @@ describe('Generatoren: alle Stile, Paletten, Größen, Varianten', () => {
             for (const seed of [0, 7]) errs.push(...check({ generator: 'haus', version: 2, seed, params: { style: st.id, palette: pal, size, form } }).map(e => `${st.id}/${form}: ${e}`))
     expect(errs.slice(0, 8)).toEqual([])
   }, 60000)
+  it('Häuser haben einen Erdgeschoss-Boden, die Wände stehen nicht auf dem Gelände', () => {
+    // Fassung 13: die Ebene unter den Wänden fehlte (Lukas: „eine Ebene fehlt“)
+    const air = (s: string) => /:(air|cave_air)$/.test(s)
+    for (const st of STYLES)
+      for (const form of st.forms)
+        for (const seed of [0, 3]) {
+          const bp = buildFromSource({ generator: 'haus', version: 2, seed, params: { style: st.id, palette: st.palettes[0], size: 'M', form } })
+          const [w, h, d] = bp.size
+          const doorY = bp.list().find(b => b.state.includes('_door[') && b.state.includes('half=lower'))!.y
+          let walls = 0, floating = 0, floor = 0
+          for (let z = 0; z < d; z++)
+            for (let x = 0; x < w; x++) {
+              const at = (y: number) => (y >= 0 && y < h ? bp.get(x, y, z) : 'minecraft:air')
+              if (!air(at(doorY - 1))) floor++
+              if ([0, 1, 2].some(i => air(at(doorY + i)) || !isOpaqueCube(at(doorY + i)))) continue
+              walls++
+              if (air(at(doorY - 1))) floating++
+            }
+          expect(floating, `${st.id}/${form}/${seed}: ${floating} von ${walls} Wandsäulen ohne Block darunter`).toBe(0)
+          expect(floor, `${st.id}/${form}/${seed}: Boden`).toBeGreaterThan(walls)
+        }
+  })
+  it('Version 3: jede Dachform in jedem Stil und jeder Bauform gültig, mit Boden', () => {
+    const errs: string[] = []
+    for (const st of STYLES)
+      for (const form of st.forms)
+        for (const roofShape of ['sattel', 'walm', 'kruppelwalm', 'mansard', 'gauben'])
+          for (const size of SIZES)
+            errs.push(...check({ generator: 'haus', version: 3, seed: 5, params: { style: st.id, palette: st.palettes[0], size, form, roofShape } }).map(e => `${st.id}/${form}/${roofShape}: ${e}`))
+    expect(errs.slice(0, 8)).toEqual([])
+  }, 120000)
+  it('Version 3: Dachformen sehen verschieden aus, Gauben haben Fenster im Dach', () => {
+    const src = (roofShape: string, seed = 2) => ({ generator: 'haus', version: 3, seed, params: { style: 'mittelalter', palette: 'mittel-putz', size: 'L', form: 'rechteck', roofShape } })
+    const shapes = new Set(['sattel', 'walm', 'kruppelwalm', 'mansard'].map(r => buildFromSource(src(r)).list().filter(b => b.state.includes('stairs')).map(b => `${b.x},${b.y},${b.z}`).sort().join('|')))
+    expect(shapes.size).toBe(4)
+    // Gauben: Fenster oberhalb der Traufe an der Längsseite
+    const glassUp = (bp: ReturnType<typeof buildFromSource>) => {
+      const door = bp.list().find(b => b.state.includes('_door[') && b.state.includes('half=lower'))!.y
+      return bp.list().filter(b => /pane|glass/.test(b.state) && b.y > door + 6).length
+    }
+    for (const seed of [1, 2, 3]) expect(glassUp(buildFromSource(src('gauben', seed))), `Seed ${seed}`).toBeGreaterThan(glassUp(buildFromSource(src('sattel', seed))))
+  })
+  it('Version 2 bleibt unverändert (gesetzte Häuser ändern sich nicht)', () => {
+    const v2 = { generator: 'haus', version: 2, seed: 9, params: { style: 'mittelalter', palette: 'mittel-putz', size: 'M', form: 'rechteck' } }
+    const a = buildFromSource(v2), b = buildFromSource({ ...v2, params: { ...v2.params, roofShape: 'mansard' } })
+    expect(b.list()).toEqual(a.list())
+  })
   it('Varianten unterscheiden sich in der Form, nicht nur im Material', () => {
     for (const st of STYLES) {
       const shapes = new Set(st.forms.map(form => {

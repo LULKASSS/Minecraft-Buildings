@@ -159,6 +159,14 @@ export class Builder {
     return this.cells.size
   }
 
+  /** Alle gesetzten Blöcke (x, y, z, Zustand), z. B. um ein gerade gebautes Stück umzubiegen. */
+  entries(): [number, number, number, BlockState][] {
+    return [...this.cells].map(([k, s]) => {
+      const [x, y, z] = k.split(',').map(Number)
+      return [x, y, z, s]
+    })
+  }
+
   toBlueprint(name: string, source: BlueprintSource, kind: 'decorative' | 'functional' = 'decorative'): Blueprint {
     let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity
     for (const k of this.cells.keys()) {

@@ -11,7 +11,7 @@ import { HOUSE_FORMS, styleById } from './styles'
 import { buildTemplate, templateExtent } from './template'
 import { DEKO } from './deko'
 
-export type Category = 'gebaeude' | 'deko' | 'natur' | 'vorlage'
+export type Category = 'gebaeude' | 'deko' | 'natur' | 'vorlage' | 'entwuerfe'
 
 export interface Extent {
   x0: number
@@ -50,7 +50,7 @@ export const CATALOG: CatalogEntry[] = [
   { id: 'haus', label: 'Haus', category: 'gebaeude', kind: 'decorative', styled: true, seeded: true, formsFor: houseForms, ground: houseGroundExtent, build: buildHouse },
   { id: 'turm', label: 'Turm', category: 'gebaeude', kind: 'decorative', styled: true, seeded: true, ground: towerExtent, build: buildTower },
   { id: 'brunnen', label: 'Brunnen', category: 'gebaeude', kind: 'decorative', styled: true, seeded: true, formsFor: wellForms, ground: wellExtent, build: buildWell },
-  { id: 'bruecke', label: 'Brücke', category: 'gebaeude', kind: 'decorative', styled: true, seeded: true, formsFor: bridgeForms, ground: bridgeExtent, build: buildBridge },
+  { id: 'bruecke', label: 'Brücke', category: 'gebaeude', kind: 'decorative', styled: true, seeded: true, sized: false, formsFor: bridgeForms, ground: bridgeExtent, build: buildBridge },
   { id: 'marktstand', label: 'Marktstand', category: 'deko', kind: 'decorative', styled: true, seeded: false, ground: stallExtent, build: buildStall },
   ...DEKO.map((d): CatalogEntry => ({ id: d.id, label: d.label, category: 'deko', kind: 'decorative', styled: true, seeded: d.seeded, sized: d.sized, ground: d.ground, build: d.build })),
   // alte Laterne bleibt baubar für gespeicherte Bauwerke, gewählt wird jetzt der Laternenpfahl

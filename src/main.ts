@@ -15,6 +15,7 @@ import { I } from './ui/icons'
 import { renderSide, type SideActions } from './ui/side-panel'
 import { learnPalette } from './style/learn'
 import { importTemplate, loadTemplates, removeTemplate, versionName } from './app/templates-store'
+import { loadDrafts } from './app/drafts'
 import { fallbackColor } from './render/block-colors'
 import { makeWorld } from './world/demo-world'
 import { ZipSource, type WorldSource } from './world/source'
@@ -57,6 +58,7 @@ view3d.onCamera = () => {
   if (view3d.outside() !== wasOutside) renderStatusChip()
 }
 view3d.onAimText = html => ($('status').innerHTML = html)
+view3d.onGhost = () => renderBuildBar()
 let groundLoading = 0
 view3d.onProgress = n => {
   if (n === groundLoading) return
@@ -311,10 +313,16 @@ const actions: SideActions = {
   },
   startPlacing(type) {
     S.placing = type
+    S.placeAdjust = { dy: 0, lockY: null }
+    S.path = []
     update()
+  },
+  finishPath() {
+    view3d.finishPath()
   },
   cancelPlacing() {
     S.placing = null
+    S.path = []
     update()
   },
   toggleTheme() {
@@ -435,6 +443,60 @@ function autoCollapse(): void {
   buildFor = build ?? (p ? buildFor : null)
 }
 
+/**
+ * Leiste unten in der Mitte: Drehen und Höhe – beim Setzen für die Vorschau, sonst für das gewählte Bauwerk.
+ * Vorher ging das nur über Tasten (R, Bild↑/↓) oder tief im Panel.
+ */
+function renderBuildBar(): void {
+  const el = $('buildbar')
+  const p = selectedPlacement()
+  const placing = !!S.placing
+  const show = !!S.session && (placing || (!!p && S.guide.layer === null))
+  el.hidden = !show
+  if (!show) return
+  el.style.left = `${freeCenter}px`
+  const btn = (act: string, icon: string, title: string, extra = '') => `<button class="btn small icon ghost" data-b="${act}" title="${title}" ${extra}>${icon}</button>`
+  let y: string, rot: number, lock = ''
+  if (placing) {
+    const t = view3d.ghostTarget
+    const a = S.placeAdjust
+    y = t ? `Y ${coord(t[1])}` : 'Y –'
+    if (a.lockY === null && a.dy) y += ` <small>${Math.abs(a.dy)} ${a.dy > 0 ? 'über' : 'unter'} Boden</small>`
+    rot = view3d.ghostRotation
+    lock = `<button class="chip" data-b="lock" aria-pressed="${a.lockY !== null}" title="Höhe festhalten: bleibt auf diesem Y, egal wohin die Maus zeigt (H)">Höhe halten</button>`
+  } else {
+    y = `Y ${coord(p!.pos[1])}`
+    rot = p!.rotation
+  }
+  el.innerHTML = `
+    ${btn('rotL', I.rotL, 'Gegen den Uhrzeigersinn drehen (Shift+R)')}<span class="bb-val">${rot}°</span>${btn('rotR', I.rotR, 'Im Uhrzeigersinn drehen (R)')}
+    <span class="bb-sep"></span>
+    ${btn('down', I.minus, 'Einen Block tiefer (Bild ↓)')}<span class="bb-val wide">${y}</span>${btn('up', I.plus, 'Einen Block höher (Bild ↑)')}
+    ${lock ? `<span class="bb-sep"></span>${lock}` : ''}`
+}
+
+$('buildbar').addEventListener('click', e => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-b]')
+  if (!b) return
+  const p = selectedPlacement()
+  const d = b.dataset.b === 'up' ? 1 : b.dataset.b === 'down' ? -1 : 0
+  if (S.placing) {
+    if (b.dataset.b === 'rotL') view3d.rotateGhost(-1)
+    if (b.dataset.b === 'rotR') view3d.rotateGhost(1)
+    if (d) view3d.adjustGhost(d)
+    if (b.dataset.b === 'lock') view3d.toggleLockY()
+    return renderBuildBar()
+  }
+  if (!p) return
+  if (b.dataset.b === 'rotL') rotatePlacement(p.id, -1)
+  if (b.dataset.b === 'rotR') rotatePlacement(p.id, 1)
+  if (d) nudgePlacement(p.id, [0, d, 0])
+  update()
+})
+
+/** Mitte des freien Bereichs (CSS-Pixel im Fenster), für die Leiste unten */
+let freeCenter = window.innerWidth / 2
+
 /** Teil des 3D-Fensters, den kein Panel verdeckt; dort liegt die Bildmitte. */
 function updateFree(): void {
   const host = $('three').getBoundingClientRect()
@@ -451,6 +513,7 @@ function updateFree(): void {
     else x1 = Math.min(x1, r.left - host.left)
   }
   view3d.scene.setFree(x1 - x0 > 120 && y1 > 120 ? { x: x0, y: 0, w: x1 - x0, h: y1 } : null)
+  freeCenter = host.left + (x0 + x1) / 2
 }
 window.addEventListener('resize', updateFree)
 
@@ -473,6 +536,7 @@ function render(): void {
   mini.invalidate()
   if (on) {
     updateFree()
+    renderBuildBar()
     view3d.sync()
   } else $('status').textContent = ''
 }
@@ -595,8 +659,10 @@ window.addEventListener('keydown', e => {
   if (isTyping(e) || e.metaKey || e.ctrlKey || e.altKey) return
   if (!S.session) return
   if (e.key === 'Escape') {
-    if (S.placing) S.placing = null
-    else if (S.bigMap) S.bigMap = false
+    if (S.placing) {
+      S.placing = null
+      S.path = []
+    } else if (S.bigMap) S.bigMap = false
     else if (S.camMode === 'fly') view3d.setMode('orbit')
     else if (S.sel) S.sel = null
     else return
@@ -614,7 +680,22 @@ window.addEventListener('keydown', e => {
   }
   if (e.code === 'KeyR' && S.placing) {
     view3d.rotateGhost(e.shiftKey ? -1 : 1)
+    return renderBuildBar()
+  }
+  if (S.placing && (e.key === 'PageUp' || e.key === 'PageDown' || e.key === '+' || e.key === '-')) {
+    e.preventDefault()
+    view3d.adjustGhost(e.key === 'PageUp' || e.key === '+' ? 1 : -1)
+    return renderBuildBar()
+  }
+  if (S.placing === 'bruecke' && (e.key === 'Enter' || e.key === 'Backspace')) {
+    e.preventDefault()
+    if (e.key === 'Enter') view3d.finishPath()
+    else view3d.undoPathPoint()
     return
+  }
+  if (S.placing && e.code === 'KeyH') {
+    view3d.toggleLockY()
+    return renderBuildBar()
   }
   const p = selectedPlacement()
   if (!p) return
@@ -642,6 +723,7 @@ window.addEventListener('keydown', e => {
 applyTheme()
 void (async () => {
   await loadTemplates()
+  await loadDrafts()
   const handle = await store.get<FileSystemDirectoryHandle>('kv', 'folder')
   if (handle) S.savedFolder = handle.name
   update()

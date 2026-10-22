@@ -1,4 +1,4 @@
-// Vorschau zum Prüfen der Generatoren: ?gen=haus&style=mittelalter&size=M&forms=rechteck,winkel&seeds=1,2
+// Vorschau zum Prüfen der Generatoren: ?gen=haus&style=mittelalter&size=M&forms=rechteck,winkel&seeds=1,2&roof=gauben&v=3
 // Mit .jar (Eingabefeld) in echten Texturen. Der Rundgang macht davon Bilder.
 import * as THREE from 'three'
 import { buildFromSource } from '../src/catalog'
@@ -62,8 +62,9 @@ async function run(t: TexturedMesher | null): Promise<void> {
         const palette = q.get('palette') ?? st.palettes[seed % st.palettes.length]
         const fig = document.createElement('figure')
         try {
-          const bp = buildFromSource({ generator: gen, version: 2, seed, params: { style, palette, size, form } })
-          fig.innerHTML = `<img src="${shot(bp, t, angle)}"><figcaption>${style} · ${form} · ${palette} · Seed ${seed} · ${bp.size.join('×')}</figcaption>`
+          const roofShape = q.get('roof') ?? undefined
+          const bp = buildFromSource({ generator: gen, version: Number(q.get('v') ?? 3), seed, params: { style, palette, size, form, ...(roofShape ? { roofShape } : {}) } })
+          fig.innerHTML = `<img src="${shot(bp, t, angle)}"><figcaption>${style} · ${form}${roofShape ? ` · ${roofShape}` : ''} · ${palette} · Seed ${seed} · ${bp.size.join('×')}</figcaption>`
         } catch (e) {
           fig.innerHTML = `<figcaption>${style} · ${form} · Fehler: ${(e as Error).message}</figcaption>`
         }

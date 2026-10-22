@@ -3,6 +3,10 @@
 import { boundsOf, type Placement } from '../blueprint/placement'
 import { blueprintMaterials } from '../blueprint/materials'
 import { buildFromSource, CATALOG, type Category } from '../catalog'
+import { BRIDGE_WIDTHS } from '../catalog/bridge'
+import { ROOF_SHAPES } from '../catalog/house'
+import { draftOf, drafts, removeDraft, toggleDraft } from '../app/drafts'
+import type { BlueprintSource } from '../blueprint/blueprint'
 import { MIXES, SPECIES } from '../catalog/nature'
 import { STYLES, type Size } from '../catalog/styles'
 import { templateList } from '../catalog/template'
@@ -11,7 +15,7 @@ import type { TexturedMesher } from '../render/textured'
 import { survivalCost } from '../style/blocks'
 import { customPalettes, palettesFor, type Palette, type Role } from '../style/palettes'
 import {
-  changePlacement, choiceSource, collisions, deletePlacement, newSeeds, nudgePlacement, placedOf,
+  changePlacement, choiceSource, placementLabel, collisions, deletePlacement, newSeeds, nudgePlacement, placedOf,
   renamePlacement, rotatePlacement, S, selectedPlacement, update,
 } from '../app/state'
 import { coord, esc, num } from '../ui/format'
@@ -30,6 +34,8 @@ export interface SideActions {
   toggleTheme(): void
   focusPoint(x: number, z: number): void
   focusPlacement(id: string, tight?: boolean): void
+  /** Brücke: gesetzte Punkte bauen */
+  finishPath(): void
   learnPalette(): void
   importTemplate(): void
   removeTemplate(id: string): void
@@ -141,8 +147,9 @@ const SIZE_LABEL: Record<Size, string> = { S: 'Klein', M: 'Mittel', L: 'Groß' }
 
 function chooser(a: SideActions): string {
   const c = b()
-  const cats: [Category, string][] = [['gebaeude', 'Gebäude'], ['deko', 'Deko'], ['natur', 'Natur'], ['vorlage', 'Vorlagen']]
+  const cats: [Category, string][] = [['gebaeude', 'Gebäude'], ['deko', 'Deko'], ['natur', 'Natur'], ['vorlage', 'Vorlagen'], ['entwuerfe', 'Entwürfe']]
   let html = `<div class="seg wide" role="tablist" id="cat-seg">${cats.map(([id, l]) => `<button class="seg-btn" data-cat="${id}" aria-selected="${c.cat === id}">${l}</button>`).join('')}<span class="seg-thumb" aria-hidden="true"></span></div>`
+  if (c.cat === 'entwuerfe') return html + draftsBlock(a)
   const types = CATALOG.filter(e => e.category === c.cat && !e.hidden && e.id !== 'vorlage')
   if (types.length) html += `<div class="chips">${types.map(t => chip('data-btype', t.id, t.label, c.type === t.id)).join('')}</div>`
 
@@ -163,11 +170,16 @@ function chooser(a: SideActions): string {
   if (c.cat !== 'vorlage' && cur?.sized !== false) {
     html += `<div class="sub">${c.type === 'pinsel' ? 'Fläche' : 'Größe'}</div><div class="chips">${(['S', 'M', 'L'] as Size[]).map(sz => chip('data-size', sz, c.type === 'pinsel' ? { S: '13 × 13', M: '21 × 21', L: '29 × 29' }[sz] : SIZE_LABEL[sz], c.size === sz)).join('')}</div>`
   }
+  if (c.type === 'bruecke') html += bridgeOptions(c.width, c.deco, 'data-bw', 'data-bd')
+  if (c.type === 'haus' && hasRoofShapes(c.style)) html += `<div class="sub">Dach</div><div class="chips">${ROOF_SHAPES.map(r => chip('data-roof', r.id, r.label, c.roofShape === r.id)).join('')}</div>`
   if (c.cat === 'vorlage' && !c.templateId) return html
   const entry = CATALOG.find(e => e.id === c.type)
   if (entry?.seeded) html += variantsBlock(a)
-  html += S.placing
-    ? `<p class="note" style="margin:12px 0 8px"><b>Klick</b> ins Gelände setzt · <b>R</b> dreht · <b>Esc</b> bricht ab</p>
+  html += S.placing && c.type === 'bruecke'
+    ? `<p class="note" style="margin:12px 0 8px"><b>Klick</b> setzt Punkte: Start, Knicke, Ziel · <b>Doppelklick</b> oder <b>Enter</b> baut · <b>⌫</b> nimmt den letzten Punkt weg · <b>Esc</b> bricht ab${S.path.length ? ` · ${S.path.length} ${S.path.length === 1 ? 'Punkt' : 'Punkte'}` : ''}</p>
+       <div class="row"><button class="btn grow" data-act="cancel-place">Abbrechen</button>${S.path.length >= 2 ? `<button class="btn accent grow" data-act="finish-path">Brücke bauen</button>` : ''}</div>`
+    : S.placing
+    ? `<p class="note" style="margin:12px 0 8px">${c.type === 'haus' ? '<b>Auf Wolle zielen:</b> das Haus passt sich eurem Woll-Grundriss an (Umriss oder Fläche). ' : ''}<b>Klick</b> ins Gelände setzt · <b>R</b> dreht · <b>Bild ↑/↓</b> Höhe · <b>H</b> hält die Höhe · <b>Esc</b> bricht ab</p>
        <button class="btn" style="width:100%" data-act="cancel-place">Abbrechen</button>`
     : `<button class="btn accent" style="width:100%;margin-top:12px" data-act="start-place">${I.cube}In die Welt setzen</button>`
   return html
@@ -184,6 +196,42 @@ function paletteRow(pal: Palette, on: boolean, a: SideActions): string {
 
 const thumbCache = new Map<string, { url: string; label: string }>()
 
+/** Vorschaubild und Zeile „Langhaus · 15 Stacks · mittel“ (zwischengespeichert) */
+function thumbOf(src: BlueprintSource, a: SideActions): { url: string; label: string } {
+  const key = JSON.stringify(src) + (a.textured() ? 't' : 'f')
+  let t = thumbCache.get(key)
+  if (!t) {
+    try {
+      const bp = buildFromSource(src)
+      const rows = blueprintMaterials(bp)
+      const total = rows.reduce((n, r) => n + r.count, 0)
+      const cost = rows.reduce((n, r) => n + r.count * survivalCost(r.item), 0) / Math.max(1, total)
+      const amount = total >= 1728 ? `${(total / 1728).toLocaleString('de-DE', { maximumFractionDigits: 1 })} Shulker` : `${Math.ceil(total / 64)} Stacks`
+      t = { url: thumbnail(bp, a.textured(), getComputedStyle(document.documentElement).getPropertyValue('--surface-2').trim() || '#eee'), label: `${formLabel(src)}${amount} · ${cost < 1.6 ? 'günstig' : cost < 2.3 ? 'mittel' : 'aufwendig'}` }
+    } catch (e) {
+      t = { url: '', label: String((e as Error).message ?? e) }
+    }
+    thumbCache.set(key, t)
+  }
+  return t
+}
+
+/** Reiter „Entwürfe“: gemerkte und schon gesetzte Varianten, zum erneuten Setzen. */
+function draftsBlock(a: SideActions): string {
+  const list = drafts()
+  if (!list.length) return `<p class="note muted" style="margin:4px 0 0">Noch nichts gemerkt. Bei den Varianten mit dem Stern merken – alles, was du setzt, landet automatisch hier.</p>`
+  const c = b()
+  const cells = list.map(d => {
+    const t = thumbOf(d.source, a)
+    const on = c.draft !== null && JSON.stringify(c.draft.source) === JSON.stringify(d.source)
+    return `<button class="var" data-draft="${d.id}" aria-pressed="${on}">${t.url ? `<img src="${t.url}" alt="" />` : ''}<span><b>${esc(d.name)}</b>${d.placed ? ' · gesetzt' : ''}<br>${esc(t.label)}</span>
+      <span class="var-x" role="button" tabindex="0" data-del-draft="${d.id}" title="Entwurf löschen">${I.close}</span></button>`
+  }).join('')
+  return `<div class="sub">Eure Entwürfe</div><div class="vars">${cells}</div>
+    ${c.draft ? (S.placing ? `<p class="note" style="margin:12px 0 8px"><b>Klick</b> ins Gelände setzt · <b>R</b> dreht · <b>Esc</b> bricht ab</p><button class="btn" style="width:100%" data-act="cancel-place">Abbrechen</button>`
+      : `<button class="btn accent" style="width:100%;margin-top:12px" data-act="start-place">${I.cube}In die Welt setzen</button>`) : ''}`
+}
+
 /** Bauform als Vorsatz in der Variantenzeile, z. B. „Winkelhaus · “ */
 function formLabel(src: { generator: string; params: Record<string, unknown> }): string {
   const f = CATALOG.find(e => e.id === src.generator)?.formsFor?.(String(src.params.style)).find(x => x.id === src.params.form)
@@ -194,22 +242,10 @@ function variantsBlock(a: SideActions): string {
   const c = b()
   const cells = c.seeds.map((seed, i) => {
     const src = choiceSource(c, seed, i)
-    const key = JSON.stringify(src) + (a.textured() ? 't' : 'f')
-    let t = thumbCache.get(key)
-    if (!t) {
-      try {
-        const bp = buildFromSource(src)
-        const rows = blueprintMaterials(bp)
-        const total = rows.reduce((n, r) => n + r.count, 0)
-        const cost = rows.reduce((n, r) => n + r.count * survivalCost(r.item), 0) / Math.max(1, total)
-        const amount = total >= 1728 ? `${(total / 1728).toLocaleString('de-DE', { maximumFractionDigits: 1 })} Shulker` : `${Math.ceil(total / 64)} Stacks`
-        t = { url: thumbnail(bp, a.textured(), getComputedStyle(document.documentElement).getPropertyValue('--surface-2').trim() || '#eee'), label: `${formLabel(src)}${amount} · ${cost < 1.6 ? 'günstig' : cost < 2.3 ? 'mittel' : 'aufwendig'}` }
-      } catch (e) {
-        t = { url: '', label: String((e as Error).message ?? e) }
-      }
-      thumbCache.set(key, t)
-    }
-    return `<button class="var" data-pick="${i}" aria-pressed="${c.pick === i}">${t.url ? `<img src="${t.url}" alt="Variante ${i + 1}" />` : ''}<span>${esc(t.label)}</span></button>`
+    const t = thumbOf(src, a)
+    const kept = !!draftOf(src)
+    return `<button class="var" data-pick="${i}" aria-pressed="${c.pick === i}">${t.url ? `<img src="${t.url}" alt="Variante ${i + 1}" />` : ''}<span>${esc(t.label)}</span>
+      <span class="var-star" role="button" tabindex="0" data-star="${i}" aria-pressed="${kept}" title="${kept ? 'Gemerkt (nochmal klicken: vergessen)' : 'Als Entwurf merken'}">${kept ? '★' : '☆'}</span></button>`
   }).join('')
   return `<div class="sub row"><span class="grow">Varianten</span><button class="linkish small" data-act="reroll">Neu würfeln</button></div><div class="vars">${cells}</div>`
 }
@@ -231,6 +267,17 @@ function templatesBlock(a: SideActions): string {
     ${c.templateId ? `<div class="chips" style="margin-top:10px">${chip('data-act', 'toggle-facade', 'Fassade im Stil', c.facade)}</div>` : ''}`
 }
 
+/** Dachformen gibt es nur bei Stilen mit Satteldach (Mittelalter, Steampunk) */
+function hasRoofShapes(style: string): boolean {
+  return STYLES.find(s => s.id === style)?.roof === 'gable'
+}
+
+/** Brücke: Breite und Deko (beim Wählen und am gesetzten Bauwerk) */
+function bridgeOptions(width: number, deco: number, wAttr: string, dAttr: string): string {
+  return `<div class="sub">Breite</div><div class="chips">${BRIDGE_WIDTHS.map(w => chip(wAttr, String(w), `${w} Blöcke`, width === w)).join('')}</div>
+    <div class="sub">Deko</div><div class="chips">${['Wenig', 'Normal', 'Viel'].map((l, i) => chip(dAttr, String(i), l, deco === i)).join('')}</div>`
+}
+
 function selectedBlocks(p: Placement, a: SideActions): string {
   const { placed } = placedOf(p)
   const bb = boundsOf(placed)
@@ -243,6 +290,15 @@ function selectedBlocks(p: Placement, a: SideActions): string {
   if (entry?.styled) {
     const style = String(params.style)
     extra += `<div class="sub">Palette</div><div class="pals">${palettesFor(style, customPalettes()).map(pal => paletteRow(pal, params.palette === pal.id, a).replace('data-palette', 'data-set-palette')).join('')}</div>`
+  }
+  if (p.source.generator === 'haus' && p.source.version >= 3 && hasRoofShapes(String(params.style))) {
+    const cur = String(params.roofShape ?? 'alle')
+    extra += `<div class="sub">Dach</div><div class="chips">${ROOF_SHAPES.map(r => chip('data-set-roof', r.id, r.id === 'alle' ? 'Zufall' : r.label, cur === r.id)).join('')}</div>`
+  }
+  if (p.source.generator === 'bruecke') {
+    const forms = entry?.formsFor?.(String(params.style)) ?? []
+    extra += `<div class="sub">Bauart</div><div class="chips">${forms.map(f => chip('data-set-form', f.id, f.label, (params.form ?? forms[0]?.id) === f.id)).join('')}</div>`
+    extra += bridgeOptions(Number(params.width ?? 5), Number(params.deco ?? 1), 'data-set-bw', 'data-set-bd')
   }
   if (p.source.generator === 'vorlage') {
     const f = params.facade as { palette: string; sides: boolean[]; roof: boolean } | undefined
@@ -312,6 +368,7 @@ function bind(el: HTMLElement, a: SideActions): void {
         try { localStorage.setItem('traces', S.traces ? '1' : '0') } catch { /* egal */ }
         return update()
       case 'cancel-place': return a.cancelPlacing()
+      case 'finish-path': return a.finishPath()
       case 'start-place': return a.startPlacing(S.build.type)
       case 'reroll':
         S.build.seeds = newSeeds()
@@ -353,7 +410,8 @@ function bind(el: HTMLElement, a: SideActions): void {
   const firstOf = (cat: Category) => CATALOG.find(e => e.category === cat && !e.hidden)!.id
   choose('data-cat', v => {
     S.build.cat = v as Category
-    S.build.type = v === 'vorlage' ? 'vorlage' : firstOf(v as Category)
+    if (v === 'entwuerfe') S.build.type = S.build.draft?.source.generator ?? S.build.type
+    else S.build.type = v === 'vorlage' ? 'vorlage' : firstOf(v as Category)
     S.placing = null
   })
   choose('data-btype', v => {
@@ -367,9 +425,42 @@ function bind(el: HTMLElement, a: SideActions): void {
   })
   choose('data-palette', v => (S.build.palette = v))
   choose('data-size', v => (S.build.size = v as Size))
+  choose('data-bw', v => (S.build.width = Number(v)))
+  choose('data-bd', v => (S.build.deco = Number(v)))
+  const setParam = (key: string, num: boolean) => (v: string) => {
+    const p = selectedPlacement()
+    if (p) changePlacement(p.id, q => (q.source.params = { ...q.source.params, [key]: num ? Number(v) : v }))
+  }
+  choose('data-set-bw', setParam('width', true))
+  choose('data-set-bd', setParam('deco', true))
+  choose('data-set-form', setParam('form', false))
+  choose('data-roof', v => (S.build.roofShape = v))
+  choose('data-set-roof', setParam('roofShape', false))
   choose('data-species', v => (S.build.species = v as never))
   choose('data-mix', v => (S.build.mix = v as never))
   choose('data-pick', v => (S.build.pick = Number(v)))
+  // Stern und Löschen liegen in der Kachel: Klick nicht an die Kachel weitergeben
+  el.querySelectorAll<HTMLElement>('[data-star]').forEach(x => x.addEventListener('click', e => {
+    e.stopPropagation()
+    const i = Number(x.dataset.star)
+    const src = choiceSource(S.build, S.build.seeds[i], i)
+    const style = STYLES.find(s => s.id === S.build.style)?.label
+    toggleDraft(src, `${placementLabel()}${style && CATALOG.find(c => c.id === src.generator)?.styled ? ` (${style})` : ''}`)
+    update()
+  }))
+  el.querySelectorAll<HTMLElement>('[data-del-draft]').forEach(x => x.addEventListener('click', e => {
+    e.stopPropagation()
+    if (S.build.draft && drafts().find(d => d.id === x.dataset.delDraft)?.source === S.build.draft.source) S.build.draft = null
+    removeDraft(x.dataset.delDraft!)
+    update()
+  }))
+  choose('data-draft', v => {
+    const d = drafts().find(q => q.id === v)
+    if (!d) return
+    S.build.draft = { name: d.name, source: d.source }
+    S.build.type = d.source.generator
+    S.placing = null
+  })
   choose('data-template', v => (S.build.templateId = v))
   el.querySelectorAll<HTMLElement>('[data-del-template]').forEach(x => x.addEventListener('click', () => a.removeTemplate(x.dataset.delTemplate!)))
   choose('data-set-palette', v => {

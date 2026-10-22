@@ -8,6 +8,7 @@ import type { Blueprint, BlueprintSource } from '../blueprint/blueprint'
 import { Builder, choose, groundAt, isSoil, randInt, rng, type Facing, type Ground } from '../style/builder'
 import { getPalette, type Role } from '../style/palettes'
 import { styleById, type HouseForm, type RoofKind, type Size, type Style } from './styles'
+import type { Rect } from './footprint'
 
 export interface HouseParams {
   style: string
@@ -16,9 +17,24 @@ export interface HouseParams {
   /** feste Bauform; ohne (oder 'alle') entscheidet der Seed */
   form?: HouseForm | 'alle'
   ground?: Ground
+  /** Grundriss aus Wolle: Rechtecke, Hauptbau zuerst bei 0,0 (Eingang an seiner Südseite) */
+  footprint?: Rect[]
+  /** Dachform (nur Stile mit Satteldach, ab Version 3) */
+  roofShape?: RoofShape
 }
 
-type VolRoof = RoofKind | 'spire' | 'shed'
+type VolRoof = RoofKind | 'spire' | 'shed' | 'halfhip' | 'gambrel'
+
+/** Dachform zum Auswählen (ab Generator-Version 3); 'alle' = der Seed entscheidet */
+export type RoofShape = 'alle' | 'sattel' | 'walm' | 'kruppelwalm' | 'mansard' | 'gauben'
+export const ROOF_SHAPES: { id: RoofShape; label: string }[] = [
+  { id: 'alle', label: 'Alle' },
+  { id: 'sattel', label: 'Satteldach' },
+  { id: 'walm', label: 'Walmdach' },
+  { id: 'kruppelwalm', label: 'Krüppelwalm' },
+  { id: 'mansard', label: 'Mansard' },
+  { id: 'gauben', label: 'Mit Gauben' },
+]
 
 /** Ein Baukörper. Flügel und Anbauten hängen an einer Seite des Hauptbaus (dir). */
 interface Vol {
@@ -51,7 +67,42 @@ interface Plan {
   steep: boolean
   /** Erdgeschoss aus Stein (Sockel-Material) */
   stoneBase: boolean
+  /** Gauben auf den langen Dachseiten des Hauptbaus (ab Version 3) */
+  dormers: boolean
+  /** Balkon im ersten Obergeschoss über der Tür (ab Version 3) */
+  balcony: boolean
   r: () => number
+}
+
+/**
+ * Regeln ab Generator-Version 3 (Fassung 15, nach Minecraft-Wiki „Roof construction guidelines“ und „Roof types“):
+ * Dachform aus Sattel, Walm, Krüppelwalm, Mansard; Gauben nur auf breiten Dächern (sonst kein Platz unter dem First),
+ * Mansard erst ab 9 Breite (vorher nicht erkennbar); Balkon nur bei zwei und mehr Stockwerken.
+ * Eigener Zufallsstrom, damit ältere Häuser (Version 2) gleich bleiben.
+ */
+function refine(source: BlueprintSource, pl: Plan): Plan {
+  if (source.version < 3) return { ...pl, dormers: false, balcony: false }
+  const p = source.params as unknown as HouseParams
+  const st = styleById(p.style)
+  const r2 = rng(source.seed * 6271 + 101)
+  const m = pl.main
+  const width = Math.min(m.w, m.d)
+  let shape: RoofShape = p.roofShape ?? 'alle'
+  if (st.roof !== 'gable') shape = 'alle'
+  else if (shape === 'alle') {
+    const pool: RoofShape[] = ['sattel', 'sattel', 'walm', 'kruppelwalm', 'kruppelwalm', 'gauben', 'gauben', ...(width >= 9 ? ['mansard', 'mansard'] as RoofShape[] : [])]
+    shape = choose(r2, pool)
+  }
+  let roof = m.roof
+  if (st.roof === 'gable') roof = shape === 'walm' ? 'hip' : shape === 'kruppelwalm' ? 'halfhip' : shape === 'mansard' ? 'gambrel' : 'gable'
+  const main = { ...m, roof }
+  const vols = pl.vols.map(v => (v === m ? main : v))
+  return {
+    ...pl, vols, main,
+    steep: roof === 'gable' || roof === 'halfhip' ? pl.steep : false,
+    dormers: shape === 'gauben' && width >= 9 && m.storeys >= 1,
+    balcony: m.storeys >= 2 && !m.jetty && st.porch !== 'veranda' && r2() < 0.45,
+  }
 }
 
 const DIRS: [Facing, number, number][] = [['south', 0, 1], ['north', 0, -1], ['east', 1, 0], ['west', -1, 0]]
@@ -61,6 +112,11 @@ const BACK: Record<Facing, Facing> = { north: 'south', south: 'north', east: 'we
 const odd = (n: number) => (n % 2 ? n : n - 1)
 
 function plan(source: BlueprintSource): Plan {
+  const p = source.params as unknown as HouseParams
+  return refine(source, p.footprint?.length ? footprintPlan(source) : basePlan(source))
+}
+
+function basePlan(source: BlueprintSource): Plan {
   const p = source.params as unknown as HouseParams
   const st = styleById(p.style)
   const r = rng(source.seed * 7919 + 13)
@@ -122,7 +178,49 @@ function plan(source: BlueprintSource): Plan {
     form, vols, main, sk: st.sockel, sh: st.storey, ov: st.overhang, cx, cz,
     door: bay ? { x: cx, z: bay.z0 + bay.d - 1 } : { x: cx, z: d - 1 },
     chimney: st.chimneys > 0 && r() > 0.25,
-    steep, stoneBase,
+    steep, stoneBase, dormers: false, balcony: false,
+    r,
+  }
+}
+
+/**
+ * Plan aus einem Woll-Grundriss: Hauptbau = erstes Rechteck, die anderen werden Anbauten. Kleine Anbauten ein
+ * Stockwerk niedriger; ihr First läuft quer zum Hauptbau, damit das Dach in die Kehle läuft.
+ */
+function footprintPlan(source: BlueprintSource): Plan {
+  const p = source.params as unknown as HouseParams
+  const st = styleById(p.style)
+  const r = rng(source.seed * 7919 + 13)
+  const [m, ...rest] = p.footprint!
+  const storeys = choose(r, st.storeys[p.size])
+  const roof: RoofKind = st.roof === 'gable' && r() < st.hipChance ? 'hip' : st.roof
+  const jetty = st.jetty && storeys >= 2 && r() < 0.5
+  const main: Vol = { kind: 'main', x0: 0, z0: 0, w: m.w, d: m.d, storeys, roof, ridge: m.d >= m.w ? 'z' : 'x', jetty, jettyAll: false }
+  const vols: Vol[] = [main]
+  for (const q of rest) {
+    const dir: Facing | undefined = q.x0 >= m.w ? 'east' : q.x0 + q.w <= 0 ? 'west' : q.z0 >= m.d ? 'south' : q.z0 + q.d <= 0 ? 'north' : undefined
+    const across = dir === 'east' || dir === 'west' ? 'x' : dir ? 'z' : q.d >= q.w ? 'z' : 'x'
+    const small = q.w * q.d < (m.w * m.d) / 2
+    vols.push({ kind: 'side', x0: q.x0, z0: q.z0, w: q.w, d: q.d, storeys: Math.max(1, small ? storeys - 1 : storeys), roof, ridge: across, jetty: false, dir })
+  }
+  const inAny = (x: number, z: number) => vols.some(v => x >= v.x0 && x < v.x0 + v.w && z >= v.z0 && z < v.z0 + v.d)
+  // Tür an der Südseite des Hauptbaus, möglichst mittig, davor frei
+  const cx = Math.floor(m.w / 2), cz = Math.floor(m.d / 2)
+  let dx = cx
+  for (let off = 0; off < m.w; off++) {
+    const cand = [cx + off, cx - off].filter(x => x >= 1 && x <= m.w - 2 && !inAny(x, m.d))
+    if (cand.length) {
+      dx = cand[0]
+      break
+    }
+  }
+  return {
+    form: 'rechteck', vols, main, sk: st.sockel, sh: st.storey, ov: st.overhang, cx, cz,
+    door: { x: dx, z: m.d - 1 },
+    chimney: st.chimneys > 0 && r() > 0.25,
+    steep: roof === 'gable' && Math.min(m.w, m.d) <= 9 && r() < st.steepChance,
+    stoneBase: storeys >= 2 && r() < st.stoneBaseChance,
+    dormers: false, balcony: false,
     r,
   }
 }
@@ -187,6 +285,11 @@ export function buildHouse(source: BlueprintSource): Blueprint {
   for (const [x, z] of F0) {
     for (let y = gnd(x, z) + 1; y < 0; y++) b.role(x, y, z, 'sockel', {}, 1)
     for (let y = 0; y < fl(0); y++) b.role(x, y, z, 'sockel', {}, 1)
+    // Erdgeschoss-Boden und unterste Wandreihe (fehlten bis Fassung 14: die Wände standen auf dem Gelände,
+    // im Bauplan fehlte die Ebene zwischen Sockel und Wand)
+    const edge = DIRS.some(([, dx, dz]) => !inF(0, x + dx, z + dz))
+    if (edge) b.role(x, fl(0), z, 'sockel', {}, 1)
+    else b.role(x, fl(0), z, 'floor')
   }
   for (const [x, z, facing] of ring.values()) {
     for (let y = gnd(x, z) + 1; y < 0; y++) b.role(x, y, z, 'sockel', {}, 1)
@@ -353,7 +456,15 @@ export function buildHouse(source: BlueprintSource): Blueprint {
     // Flügel laufen ins Hauptdach hinein (Kehle), statt mit einer Giebelwand davor zu enden
     const ext: [number, number] = v.kind === 'main' ? [0, 0] : extendToward(v, main)
     switch (v.roof) {
-      case 'gable': gableRoof(b, st, v, fx0, fz0, fw, fd, R, ov, ext, put, v.kind === 'main', pl.steep); break
+      case 'gable': gableRoof(b, st, v, fx0, fz0, fw, fd, R, ov, ext, put, v.kind === 'main', () => (pl.steep ? 2 : 1)); break
+      case 'gambrel': {
+        // Mansard: unteres Drittel bis gut zur Hälfte steil (zwei Stufen je Schritt), darüber flach
+        const half = Math.ceil(Math.min(fw, fd) / 2) + ov
+        const k = Math.max(2, Math.round(half * 0.45))
+        gableRoof(b, st, v, fx0, fz0, fw, fd, R, ov, ext, put, v.kind === 'main', i => (i < k ? 2 : 1))
+        break
+      }
+      case 'halfhip': halfHipRoof(b, st, v, fx0, fz0, fw, fd, R, ov, put); break
       case 'hip': hipRoof(b, v, fx0, fz0, fw, fd, R, ov, false, put); break
       case 'pagoda':
         hipRoof(b, v, fx0, fz0, fw, fd, R, Math.max(2, ov), true, put)
@@ -364,6 +475,59 @@ export function buildHouse(source: BlueprintSource): Blueprint {
       default:
         flatRoof(b, st, v, fx0, fz0, fw, fd, R, ov, put, vols, inVol, top)
         if (v.kind === 'tower' && v.roof === 'parapet') domeRoof(b, v, fx0, fz0, fw, R, put)
+    }
+  }
+
+  // ---------- Gauben (Wandgauben) auf den langen Seiten des Hauptdachs ----------
+  // Wiki „Roof types“, Dormers: „the wall below the dormer is extended upwards and given its own roof section“.
+  // Je Seite 1–3 Gauben, 3 breit, Abstand mindestens 2 zum Giebel; ihr Dach läuft quer in die Hauptfläche.
+  if (pl.dormers && (main.roof === 'gable' || main.roof === 'gambrel')) {
+    const R = top(main)
+    const alongZ = main.ridge === 'z'
+    const len = alongZ ? main.d : main.w
+    const count = Math.max(1, Math.min(3, Math.floor((len - 3) / 5)))
+    const step = Math.floor(len / (count + 1))
+    const plus: Facing = alongZ ? 'south' : 'east', minus: Facing = alongZ ? 'north' : 'west'
+    for (const side of [-1, 1]) {
+      // Wandlinie und Richtung nach innen (quer zum First)
+      // oberstes Stockwerk kann vorkragen: dann liegt die Wand eine Reihe weiter außen
+      const out = alongZ ? (main.jettyAll && main.storeys >= 2 ? 1 : 0) : main.jetty && main.storeys >= 2 ? 1 : 0
+      const wallU = side < 0 ? (alongZ ? main.x0 : main.z0) - out : (alongZ ? main.x0 + main.w - 1 : main.z0 + main.d - 1) + out
+      const inward = -side
+      const at = (u: number, a: number): [number, number] => (alongZ ? [u, a] : [a, u])
+      for (let n = 1; n <= count; n++) {
+        const c = (alongZ ? main.z0 : main.x0) + n * step
+        // Platz frei? (kein Anbau vor dieser Wand)
+        if ([-1, 0, 1].some(d => { const [x, z] = at(wallU - inward, c + d); return inF(main.storeys - 1, x, z) })) continue
+        let depth = 0
+        for (let u = wallU, i = 0; i < 8; u += inward, i++) {
+          const [x, z] = at(u, c)
+          // bis dorthin, wo die Hauptfläche die Höhe des Gaubendachs erreicht: dort läuft es hinein
+          if ((roofTop.get(`${x},${z}`) ?? -99) >= R + 4) break
+          depth = i + 1
+        }
+        if (depth < 2) continue
+        for (let i = -1; i <= depth; i++) {
+          const u = wallU + inward * i
+          for (const d of [-1, 0, 1]) {
+            const [x, z] = at(u, c + d)
+            if (i >= 0)
+              for (let y = R + 1; y <= R + 3; y++) {
+                if (i === 0) {
+                  // Front: Pfosten außen, Fenster in der Mitte, Sturz darüber
+                  if (d === 0) y <= R + 2 ? b.set(x, y, z, windowState(x, y, z)) : b.beam(x, y, z, 'frame', alongZ ? 'z' : 'x')
+                  else b.beam(x, y, z, 'frame', 'y')
+                } else if (d === 0) b.clear(x, y, z)
+                else b.role(x, y, z, 'wall')
+              }
+            // eigenes kleines Satteldach, First quer zum Hauptdach
+            if (d === 0) {
+              b.role(x, R + 4, z, 'roof')
+              b.form(x, R + 5, z, 'trim', 'slab', { type: 'bottom' })
+            } else b.form(x, R + 4, z, i === -1 ? 'trim' : 'roof', 'stairs', { facing: d < 0 ? plus : minus, half: 'bottom' })
+          }
+        }
+      }
     }
   }
 
@@ -386,7 +550,30 @@ export function buildHouse(source: BlueprintSource): Blueprint {
   const porchY = fl(0) + 3
   const light = b.main('light')
   const outside = (x: number, z: number) => !inF(0, x, z)
-  if (st.porch === 'canopy') {
+
+  // ---------- Balkon im ersten Stock über der Tür (dient zugleich als Vordach) ----------
+  const balcony = pl.balcony && !vols.some(v => v !== main && v.z0 >= main.z0 + main.d)
+  if (balcony) {
+    const yb = fl(1)
+    const xs = [door.x - 1, door.x, door.x + 1 + (doubleDoor ? 1 : 0)]
+    for (const x of xs)
+      for (const z of [zf + 1, zf + 2]) {
+        for (let y = yb + 1; y <= yb + 3; y++) b.clear(x, y, z)
+        b.form(x, yb, z, 'floor', 'slab', { type: 'top' })
+      }
+    for (const x of [xs[0] - 1, ...xs, xs[xs.length - 1] + 1]) b.form(x, yb + 1, zf + 2, 'detail', 'fence')
+    for (const x of [xs[0] - 1, xs[xs.length - 1] + 1]) b.form(x, yb + 1, zf + 1, 'detail', 'fence')
+    // Knaggen darunter
+    for (const x of [xs[0], xs[xs.length - 1]]) b.form(x, yb - 1, zf + 1, 'frame', 'stairs', { facing: 'north', half: 'top' })
+    // Tür vom Obergeschoss auf den Balkon
+    b.set(door.x, yb + 1, zf, `${doorId}[facing=north,half=lower,hinge=left,open=false]`)
+    b.set(door.x, yb + 2, zf, `${doorId}[facing=north,half=upper,hinge=left,open=false]`)
+    b.set(xs[0], yb - 1, zf + 2, `${light}[hanging=true]`)
+    b.set(xs[xs.length - 1], yb - 1, zf + 2, `${light}[hanging=true]`)
+  }
+  if (balcony) {
+    // Vordach entfällt, der Balkon deckt den Eingang
+  } else if (st.porch === 'canopy') {
     for (let x = door.x - 1; x <= door.x + 1 + (doubleDoor ? 1 : 0); x++) b.form(x, porchY, zf + 1, 'roof', 'stairs', { facing: 'north', half: 'bottom' })
     b.form(door.x - 2, porchY, zf + 1, 'roof', 'stairs', { facing: 'east', half: 'bottom' })
     b.form(door.x + 2 + (doubleDoor ? 1 : 0), porchY, zf + 1, 'roof', 'stairs', { facing: 'west', half: 'bottom' })
@@ -565,7 +752,10 @@ type Put = (self: Vol, x: number, y: number, z: number, place: () => void, surfa
 
 // ---------- Dächer ----------
 
-function gableRoof(b: Builder, st: Style, v: Vol, fx0: number, fz0: number, fw: number, fd: number, R: number, ov: number, ext: [number, number], put: Put, isMain: boolean, steep: boolean): void {
+/** Steigung je Schritt nach innen: 1 normal, 2 steil; Mansard unten steil, oben flach */
+type Rise = (i: number) => number
+
+function gableRoof(b: Builder, st: Style, v: Vol, fx0: number, fz0: number, fw: number, fd: number, R: number, ov: number, ext: [number, number], put: Put, isMain: boolean, riseAt: Rise): void {
   const alongZ = v.ridge === 'z'
   const U = alongZ ? fw : fd, V = alongZ ? fd : fw
   const u0 = alongZ ? fx0 : fz0, v0 = alongZ ? fz0 : fx0
@@ -574,10 +764,11 @@ function gableRoof(b: Builder, st: Style, v: Vol, fx0: number, fz0: number, fw: 
   const down: Facing = alongZ ? 'west' : 'north'
   const vLo = -1 - ext[0], vHi = V + ext[1]
   // steil: je Schritt nach innen zwei Stufen übereinander (wie im Vorbild „55 Tricks“)
-  const rise = steep ? 2 : 1
+  let y = R - ov + 1
   for (let i = 0; ; i++) {
+    const rise = riseAt(i)
+    if (i > 0) y += riseAt(i - 1)
     const left = -ov + i, right = U - 1 + ov - i
-    const y = R - ov + 1 + i * rise
     if (left > right) break
     for (let vv = vLo; vv <= vHi; vv++) {
       // Kantenholz an Traufe nur beim Hauptdach; Nebendächer bleiben im Dachmaterial, sonst wirkt die Kehle unruhig
@@ -609,7 +800,7 @@ function gableRoof(b: Builder, st: Style, v: Vol, fx0: number, fz0: number, fw: 
         for (const vv of ends) {
           const [x, z] = xz(u, vv)
           const center = u === Math.floor((U - 1) / 2)
-          const gableWindow = center && (yy === R + 2 || (steep && yy === R + 3)) && right - left >= 5
+          const gableWindow = center && (yy === R + 2 || (rise > 1 && yy === R + 3)) && right - left >= 5
           put(v, x, yy, z, () => {
             if (gableWindow) b.role(x, yy, z, 'window')
             else if (st.frame === 'timber' && (u === 0 || u === U - 1 || center)) b.role(x, yy, z, 'frame', { axis: 'y' })
@@ -617,6 +808,51 @@ function gableRoof(b: Builder, st: Style, v: Vol, fx0: number, fz0: number, fw: 
           }, false)
         }
     }
+  }
+}
+
+/**
+ * Krüppelwalm: unten Satteldach mit Giebelwänden, das obere Stück walmt an beiden Enden ab.
+ * Wiki „Roof types“: „Half-hipped roof … gable roof for part of the height, then hipped for the remainder“.
+ */
+function halfHipRoof(b: Builder, st: Style, v: Vol, fx0: number, fz0: number, fw: number, fd: number, R: number, ov: number, put: Put): void {
+  const alongZ = v.ridge === 'z'
+  const U = alongZ ? fw : fd, V = alongZ ? fd : fw
+  const u0 = alongZ ? fx0 : fz0, v0 = alongZ ? fz0 : fx0
+  const xz = (u: number, vv: number): [number, number] => (alongZ ? [u0 + u, v0 + vv] : [v0 + vv, u0 + u])
+  const upU: Facing = alongZ ? 'east' : 'south', downU: Facing = alongZ ? 'west' : 'north'
+  const upV: Facing = alongZ ? 'south' : 'east', downV: Facing = alongZ ? 'north' : 'west'
+  const half = Math.ceil(U / 2) + ov
+  const k = Math.max(2, Math.round(half * 0.55)) // so viele Reihen Satteldach, dann Walm
+  for (let i = 0; ; i++) {
+    const left = -ov + i, right = U - 1 + ov - i
+    if (left > right) break
+    const y = R - ov + 1 + i
+    const inset = Math.max(0, i - k + 1)
+    const vLo = -1 + inset, vHi = V + inset * -1
+    for (let vv = vLo; vv <= vHi; vv++)
+      for (let u = left; u <= right; u++) {
+        const sideU = u === left || u === right
+        const endV = i >= k && (vv === vLo || vv === vHi)
+        if (!sideU && !endV) continue
+        const [x, z] = xz(u, vv)
+        const role: Role = i === 0 ? 'trim' : 'roof'
+        if (left === right || (endV && vLo === vHi)) put(v, x, y, z, () => b.form(x, y, z, 'trim', 'slab', { type: 'bottom' }))
+        else if (sideU) put(v, x, y, z, () => b.form(x, y, z, role, 'stairs', { facing: u === left ? upU : downU, half: 'bottom' }))
+        else put(v, x, y, z, () => b.form(x, y, z, role, 'stairs', { facing: vv === vLo ? upV : downV, half: 'bottom' }))
+      }
+    // Giebelwand unter dem Satteldach-Teil
+    if (i < k && y > R)
+      for (let u = Math.max(0, left + 1); u <= Math.min(U - 1, right - 1); u++)
+        for (const vv of [0, V - 1]) {
+          const [x, z] = xz(u, vv)
+          const center = u === Math.floor((U - 1) / 2)
+          put(v, x, y, z, () => {
+            if (center && y === R + 2 && right - left >= 5) b.role(x, y, z, 'window')
+            else if (st.frame === 'timber' && (u === 0 || u === U - 1 || center)) b.role(x, y, z, 'frame', { axis: 'y' })
+            else b.role(x, y, z, 'wall')
+          }, false)
+        }
   }
 }
 

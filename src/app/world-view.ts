@@ -19,6 +19,9 @@ import { NO_SURFACE } from '../world/chunk'
 import { TILE, TRACE } from '../world/tile'
 import { addPlacement, choiceSource, newSeeds, placedOf, placementLabel, rememberCamera, S, saveProject, selectedPlacement, toast, update } from './state'
 import { firstOpenLayer } from '../ui/guide'
+import { fitFootprint, type Fit } from '../catalog/footprint'
+import { rememberPlaced } from './drafts'
+import { styleById } from '../catalog/styles'
 import type { WorldSession } from './world-session'
 
 const PIECE = 32
@@ -61,6 +64,8 @@ export class WorldView {
   onProgress: (loading: number) => void = () => {}
   onAimText: (html: string) => void = () => {}
   onCamera: () => void = () => {}
+  /** Vorschau beim Setzen hat sich bewegt (für die Höhenanzeige) */
+  onGhost: () => void = () => {}
 
   constructor(host: HTMLElement) {
     this.scene = new Scene3D(host)
@@ -71,6 +76,11 @@ export class WorldView {
       this.onCamera()
     }
     this.scene.onClick = a => this.clicked(a)
+    this.scene.onDouble = () => {
+      if (S.placing !== 'bruecke') return false
+      this.finishPath()
+      return true
+    }
     this.scene.onMode = m => {
       S.camMode = m
       update()
@@ -607,6 +617,30 @@ export class WorldView {
 
   // ---------- Platzieren ----------
 
+  /** Drehung der Vorschau beim Setzen (Grad) */
+  get ghostRotation(): Rotation {
+    return this.ghostRot
+  }
+
+  /** Weltposition, auf der die Vorschau gerade steht (mit Höhen-Anpassung), für die Anzeige */
+  ghostTarget: Vec3 | null = null
+
+  /** Höhe beim Setzen ändern (Leiste, Bild↑/↓): festgehaltene Höhe mitziehen, sonst Abstand zum Boden */
+  adjustGhost(d: number): void {
+    const a = S.placeAdjust
+    if (a.lockY !== null) a.lockY += d
+    else a.dy += d
+    this.syncGhost()
+  }
+
+  /** Höhe festhalten: die Vorschau bleibt auf diesem Y, egal wohin die Maus zeigt (z. B. Plattform, Hang) */
+  toggleLockY(): void {
+    const a = S.placeAdjust
+    a.lockY = a.lockY === null ? (this.ghostTarget?.[1] ?? null) : null
+    if (a.lockY === null) a.dy = 0
+    this.syncGhost()
+  }
+
   rotateGhost(dir: 1 | -1): void {
     this.ghostRot = ((((this.ghostRot + dir * 90) % 360) + 360) % 360) as Rotation
     this.syncGhost()
@@ -614,8 +648,108 @@ export class WorldView {
 
   private ghostCache: { key: string; bp: Blueprint } | null = null
 
+  /** Brücke: Quelle mit dem Weg aus den geklickten Punkten (und dem Mauszeiger als vorläufigem Ende). */
+  private pathSource(end: Vec3 | null): { src: BlueprintSource; first: Vec3 } | null {
+    const pts = end ? [...S.path, end] : [...S.path]
+    if (pts.length < 2) return null
+    const first = pts[0]
+    const src = choiceSource()
+    src.params = { ...src.params, path: pts.map(q => [q[0] - first[0], q[2] - first[2]]) }
+    return { src, first }
+  }
+
+  /** Brücke aus den geklickten Punkten setzen. */
+  finishPath(): void {
+    const ps = this.pathSource(null)
+    if (!ps) return toast('Für eine Brücke mindestens Start und Ziel anklicken.')
+    const ground = this.groundFor(ps.src, ps.first, 0, false)
+    const label = placementLabel()
+    S.placing = null
+    S.path = []
+    addPlacement({ ...ps.src, params: { ...ps.src.params, ground } }, label, ps.first, 0)
+    S.build.seeds = newSeeds()
+  }
+
+  undoPathPoint(): void {
+    S.path.pop()
+    this.ghostCache = null
+    this.syncGhost()
+    update()
+  }
+
+  /** Haus setzen und auf Wolle gezielt: Grundriss aus der Wolle (zwischengespeichert je Wollfläche) */
+  private wool: (Fit & { cells: Set<string>; y: number }) | null = null
+  private woolHere: Fit | null = null
+
+  /**
+   * Wollfläche unter dem Mauszeiger: alle zusammenhängenden Wollblöcke (auch über Ecken und bis 2 Blöcke
+   * höher oder tiefer, auf unebenem Boden ausgelegt). Das Haus steht auf der Höhe, auf der die meiste Wolle liegt.
+   */
+  private woolFit(a: Aim): Fit | null {
+    const isWool = (x: number, y: number, z: number) => {
+      const t = this.terrainAt(x, y, z)
+      return !!t && /_wool$/.test(parseState(t).name)
+    }
+    if (!isWool(a.x, a.y, a.z)) return null
+    const k0 = `${a.x},${a.z}`
+    if (this.wool && Math.abs(this.wool.y - a.y) <= 2 && this.wool.cells.has(k0)) return this.wool
+    const cells = new Map<string, number>([[k0, a.y]])
+    const queue: [number, number, number][] = [[a.x, a.y, a.z]]
+    while (queue.length && cells.size < 4000) {
+      const [x, y, z] = queue.pop()!
+      for (let dz = -1; dz <= 1; dz++)
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, nz = z + dz, k = `${nx},${nz}`
+          if (cells.has(k) || Math.abs(nx - a.x) > 96 || Math.abs(nz - a.z) > 96) continue
+          const ny = [0, 1, -1, 2, -2].map(d => y + d).find(yy => isWool(nx, yy, nz))
+          if (ny === undefined) continue
+          cells.set(k, ny)
+          queue.push([nx, ny, nz])
+        }
+    }
+    const count = new Map<number, number>()
+    for (const y of cells.values()) count.set(y, (count.get(y) ?? 0) + 1)
+    const y = [...count].sort((p, q) => q[1] - p[1] || p[0] - q[0])[0][0]
+    const fit = fitFootprint([...cells.keys()].map(k => k.split(',').map(Number) as [number, number]), y)
+    this.wool = fit ? { ...fit, cells: new Set(cells.keys()), y } : null
+    return fit
+  }
+
+  /** Quelle für ein Haus auf dem Woll-Grundriss */
+  private woolSource(fit: Fit): BlueprintSource {
+    const src = choiceSource()
+    const { form: _, ...params } = src.params as Record<string, unknown>
+    void _
+    return { ...src, params: { ...params, footprint: fit.footprint } }
+  }
+
   private ghostBlueprint(target: Vec3 | null): Blueprint | null {
     if (!S.placing) return null
+    if (this.woolHere) {
+      const fit = this.woolHere
+      const src = this.woolSource(fit)
+      const ground = this.groundFor(src, fit.pos, fit.rotation, false)
+      const key = JSON.stringify([src, fit.rotation, ground])
+      if (this.ghostCache?.key === key) return this.ghostCache.bp
+      const bp = transformBlueprint(buildFromSource({ ...src, params: { ...src.params, ground } }), fit.rotation)
+      this.ghostCache = { key, bp }
+      return bp
+    }
+    if (S.placing === 'bruecke') {
+      const ps = this.pathSource(target)
+      if (!ps) return null
+      const ground = this.groundFor(ps.src, ps.first, 0, false)
+      const key = JSON.stringify([ps.src, ground])
+      if (this.ghostCache?.key === key) return this.ghostCache.bp
+      try {
+        const bp = buildFromSource({ ...ps.src, params: { ...ps.src.params, ground } })
+        this.ghostCache = { key, bp }
+        return bp
+      } catch (e) {
+        toast(String((e as Error).message ?? e), true)
+        return null
+      }
+    }
     const src = choiceSource()
     const ground = target ? this.groundFor(src, target, this.ghostRot, false) : undefined
     const key = JSON.stringify([src, this.ghostRot, ground])
@@ -642,10 +776,12 @@ export class WorldView {
 
   private ghostMeshKey: string | null = null
 
-  /** Weltposition, auf der der Anker landet: auf dem anvisierten Block, an Wänden daneben. */
+  /** Weltposition, auf der der Anker landet: auf dem anvisierten Block, an Wänden daneben; dazu die Höhe aus der Leiste. */
   private targetOf(a: Aim & { face: Vec3 }): Vec3 {
-    if (a.face[1] === 1 || a.placementId) return [a.x, a.y, a.z]
-    return [a.x + a.face[0], a.y + Math.min(0, a.face[1]), a.z + a.face[2]]
+    const t: Vec3 = a.face[1] === 1 || a.placementId ? [a.x, a.y, a.z] : [a.x + a.face[0], a.y + Math.min(0, a.face[1]), a.z + a.face[2]]
+    const adj = S.placeAdjust
+    t[1] = adj.lockY ?? t[1] + adj.dy
+    return t
   }
 
   private aimChanged(a: (Aim & { face: Vec3 }) | null): void {
@@ -656,8 +792,15 @@ export class WorldView {
       html += ` &nbsp;·&nbsp; ${state && !isAir(state) ? label(state) : 'Block'} X <b>${a.x}</b> · Y <b>${a.y}</b> · Z <b>${a.z}</b>`
     }
     this.onAimText(html)
-    if (!S.placing || !a) return this.scene.moveGhost(null)
-    const t = this.targetOf(a)
+    if (!S.placing || !a) {
+      this.ghostTarget = null
+      return this.scene.moveGhost(null)
+    }
+    this.woolHere = S.placing === 'haus' && !a.placementId ? this.woolFit(a) : null
+    const t = this.woolHere ? [...this.woolHere.pos] as Vec3 : this.targetOf(a)
+    const moved = this.ghostTarget?.join() !== t.join()
+    this.ghostTarget = t
+    if (moved) this.onGhost()
     const bp = this.ghostBlueprint(t)
     if (!bp) return this.scene.moveGhost(null)
     // Vorschau nur neu vermaschen, wenn sich das Bauwerk selbst geändert hat (Fundament, Variante, Drehung)
@@ -666,11 +809,31 @@ export class WorldView {
       this.ghostMeshKey = meshKey
       this.scene.setGhost(this.mesh(bp.list(), () => false, true))
     }
-    this.scene.moveGhost([t[0] - bp.anchor[0], t[1] - bp.anchor[1], t[2] - bp.anchor[2]])
+    const at = S.placing === 'bruecke' && S.path.length ? S.path[0] : t
+    this.scene.moveGhost([at[0] - bp.anchor[0], at[1] - bp.anchor[1], at[2] - bp.anchor[2]])
   }
 
   private clicked(a: (Aim & { face: Vec3 }) | null): void {
     if (!this.session) return
+    if (S.placing === 'bruecke') {
+      if (!a) return
+      const t = this.targetOf(a)
+      const last = S.path[S.path.length - 1]
+      if (!last || last[0] !== t[0] || last[2] !== t[2]) S.path.push(t)
+      this.aimChanged(this.scene.aim)
+      update()
+      return
+    }
+    if (S.placing && a && this.woolHere) {
+      const fit = this.woolHere
+      const src = this.woolSource(fit)
+      const ground = this.groundFor(src, fit.pos, fit.rotation, false)
+      S.placing = null
+      addPlacement({ ...src, params: { ...src.params, ground } }, 'Haus auf Wolle', fit.pos, fit.rotation)
+      S.build.seeds = newSeeds()
+      toast(`Haus auf den Woll-Grundriss gesetzt (${fit.footprint.length === 1 ? 'ein Baukörper' : `${fit.footprint.length} Baukörper`}).${fit.leftover ? ` ${fit.leftover} Wollblöcke passten in kein Rechteck ab 3 × 3 und bleiben frei.` : ''} Wolle wird beim Bauen ersetzt.`)
+      return
+    }
     if (S.placing) {
       if (!a) return
       const pos = this.targetOf(a)
@@ -679,6 +842,9 @@ export class WorldView {
       const label = placementLabel()
       S.placing = null
       addPlacement({ ...src, params: { ...src.params, ground } }, label, pos, this.ghostRot)
+      // gesetzt = automatisch unter „Entwürfe“, damit man ihn woanders wieder setzen kann
+      const style = entryOf(src.generator).styled && typeof src.params.style === 'string' ? ` (${styleById(src.params.style).label})` : ''
+      rememberPlaced(src, `${label}${S.build.cat === 'entwuerfe' ? '' : style}`)
       S.build.seeds = newSeeds()
       return
     }

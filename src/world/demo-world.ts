@@ -35,8 +35,15 @@ export function demoInhabited(cx: number, cz: number): number {
   return Math.round((at(6.5, 6.5, 30, 4) + at(0.5, 0.5, 2, 3)) * 3600 * 20)
 }
 
+/** Woll-Grundriss (nur der Rand, L-Form) auf dem Gelände, wie ihn Lukas im Spiel auslegt */
+export function inWoolOutline(x: number, z: number): boolean {
+  const inL = (px: number, pz: number) => (px >= 80 && px <= 90 && pz >= 112 && pz <= 120) || (px >= 91 && px <= 96 && pz >= 116 && pz <= 120)
+  return inL(x, z) && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => !inL(x + dx, z + dz))
+}
+
 export function testBlock(x: number, y: number, z: number): string {
   const h = terrainHeight(x, z)
+  if (y === h + 1 && inWoolOutline(x, z) && h > WATER_LEVEL + 1) return 'minecraft:white_wool'
   if (y > h && y <= h + TRUNK + 2) {
     if (treeAt(x, z) && y <= h + TRUNK) return 'minecraft:oak_log[axis=y]'
     for (let dz = -2; dz <= 2; dz++)
