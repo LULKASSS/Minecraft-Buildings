@@ -20,6 +20,8 @@ export class FlyControls {
   constructor(readonly camera: THREE.PerspectiveCamera, private el: HTMLElement) {
     camera.rotation.order = 'YXZ'
     window.addEventListener('keydown', e => {
+      // Mac: solange ⌘ gedrückt ist, kommt für andere Tasten kein keyup – sonst bliebe W hängen und die Kamera flöge endlos weiter
+      if (e.key === 'Meta') this.keys.clear()
       if (isTyping(e) || e.metaKey || e.altKey) return
       if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight', 'KeyQ', 'KeyE'].includes(e.code)) {
         this.keys.add(e.code)
@@ -28,6 +30,7 @@ export class FlyControls {
     })
     window.addEventListener('keyup', e => this.keys.delete(e.code))
     window.addEventListener('blur', () => this.keys.clear())
+    document.addEventListener('visibilitychange', () => this.keys.clear())
     document.addEventListener('mousemove', e => {
       if (!this.enabled) return
       if (this.locked) this.look(e.movementX, e.movementY)

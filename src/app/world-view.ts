@@ -56,6 +56,8 @@ export class WorldView {
   private tickTimer: number | undefined
   private userMoved = false
   private start: Vec3 = [0, 64, 0]
+  /** Stelle beim Öffnen der Welt (start wandert beim Neuaufbau mit, das hier nicht) */
+  private opened: Vec3 = [0, 64, 0]
   onProgress: (loading: number) => void = () => {}
   onAimText: (html: string) => void = () => {}
   onCamera: () => void = () => {}
@@ -95,12 +97,15 @@ export class WorldView {
     const cam = S.project.camera
     const sp = session.info.spawn
     const y = (x: number, z: number) => session.surfaceAt(x, z) ?? 70
+    // gemerkte Kamera nur, wenn sie in der Welt liegt: früher konnte sie weit ins Leere wandern, dort lädt nichts
+    const camOk = !!cam && session.hasRegion(Math.floor(cam.x / TILE), Math.floor(cam.z / TILE))
     // gemerkte Höhe nicht blind übernehmen: sie kann aus einer Fassung mit falschen Höhen stammen
-    this.start = cam ? [cam.x, y(cam.x, cam.z), cam.z] : sp ? [sp[0], y(sp[0], sp[2]), sp[2]] : [0, 70, 0]
+    this.start = camOk ? [cam.x, y(cam.x, cam.z), cam.z] : sp ? [sp[0], y(sp[0], sp[2]), sp[2]] : [0, 70, 0]
+    this.opened = [...this.start]
     this.groundCheck = true
-    this.userMoved = !!cam
+    this.userMoved = camOk
     this.rebase(this.start[0], this.start[2])
-    this.scene.jumpTo(this.start[0], this.start[1], this.start[2], Math.max(40, cam?.dist ?? 140))
+    this.scene.jumpTo(this.start[0], this.start[1], this.start[2], camOk ? Math.max(40, cam.dist) : 140)
     this.sync()
     this.tick()
   }
@@ -113,10 +118,32 @@ export class WorldView {
     this.scene.clear([0, 0, 0])
   }
 
-  /** Zur Stelle springen, an der die Welt geöffnet wurde. */
+  /** Zur Base (Ort mit der meisten Spielzeit), sonst zur Stelle, an der die Welt geöffnet wurde. */
   home(): void {
-    this.scene.jumpTo(this.start[0], this.start[1], this.start[2], 140)
-    this.groundCheck = true
+    const spot = this.session?.hotspots()[0]
+    if (spot) return this.jumpTo(spot.x, spot.z, 140)
+    this.jumpTo(this.opened[0], this.opened[2], 140)
+  }
+
+  /** Steht der Drehpunkt über einer Stelle, von der es keine Weltdaten gibt? */
+  outside(): boolean {
+    if (!this.session) return false
+    const [fx, , fz] = this.scene.focusWorld()
+    return !this.session.hasRegion(Math.floor(fx / TILE), Math.floor(fz / TILE))
+  }
+
+  /** Kamera nie weiter als ein Stück über den Rand der Welt hinaus, nie unter Y −64 oder über die Bauhöhe. */
+  private keepInWorld(): void {
+    const b = this.session!.regionBounds()
+    const [fx, fy, fz] = this.scene.focusWorld()
+    const m = 384
+    const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v))
+    const dx = clamp(fx, b.x0 - m, b.x1 + m) - fx
+    const dz = clamp(fz, b.z0 - m, b.z1 + m) - fz
+    const dy = clamp(fy, -64, 330) - fy
+    if (dx || dy || dz) this.scene.shift(dx, dy, dz)
+    const cy = this.scene.cameraWorld()[1]
+    if (cy < -60) this.scene.shift(0, -60 - cy, 0)
   }
 
   /** Irgendwohin springen (Minikarte, Orte mit viel Spielzeit). */
@@ -190,6 +217,7 @@ export class WorldView {
   private tick(): void {
     const s = this.session
     if (!s || !this.scene.host.offsetParent) return
+    this.keepInWorld()
     const [fx, fy, fz] = this.scene.focusWorld()
     const [bx, , bz] = this.scene.base
     if (Math.hypot(fx - bx, fz - bz) > REBASE) {
@@ -234,7 +262,7 @@ export class WorldView {
     this.updateLods(fx, fz)
     this.fitToGround()
     this.onProgress(this.inFlight + want.length)
-    if (this.scene.mode === 'orbit' && !this.groundCheck) rememberCamera({ x: fx, y: fy, z: fz, dist })
+    if (this.scene.mode === 'orbit' && !this.groundCheck && !this.outside()) rememberCamera({ x: fx, y: fy, z: fz, dist })
   }
 
   private async loadPiece(x0: number, z0: number): Promise<void> {
@@ -373,7 +401,7 @@ export class WorldView {
     const sel = selectedPlacement()
     const sb = sel && this.buildingBounds.get(sel.id)?.b
     const cutY = sel && S.guide.layer !== null ? placedOf(sel).layers[S.guide.layer]?.y : undefined
-    const cut = sb && cutY !== undefined && this.terrainAbove(sb.min, sb.max, cutY) ? { min: sb.min, max: sb.max, y: cutY } : null
+    const cut = sb && cutY !== undefined && this.terrainAbove(sb.min, sb.max, cutY) ? { min: sb.min, max: sb.max, y: cutY, walls: this.cutWalls(sb.min, sb.max, cutY) } : null
     this.scene.setGuide(sel ? sel.id : null, S.guide.layer, S.guide.single, cut)
     this.followLayer(sel)
     this.syncGhost()
@@ -391,21 +419,66 @@ export class WorldView {
     return false
   }
 
-  /** Kamera auf die Höhe der aktuellen Ebene heben/senken, damit sie in der Bildmitte bleibt. */
+  /** Bauwerk, auf das die Bau-Ansicht schon einmal ausgerichtet wurde (danach bleiben Winkel und Abstand des Nutzers). */
+  private framedId: string | null = null
+
+  /**
+   * Bau-Ansicht: beim ersten Mal von Süden schräg von oben auf die Ebene, Grundfläche füllt den freien Bereich;
+   * beim Weiterblättern nur den Drehpunkt auf die neue Ebene setzen. „Alles“ und frisch gesetzte Bauwerke bewegen nichts.
+   */
   private followLayer(sel: Placement | null): void {
     const key = sel ? `${sel.id}|${S.guide.layer}` : ''
     if (key === this.guideKey) return
     this.guideKey = key
     const b = sel && this.buildingBounds.get(sel.id)?.b
-    if (!sel || !b) return
-    const layers = placedOf(sel).layers
-    const y = S.guide.layer === null ? (b.min[1] + b.max[1]) / 2 : layers[S.guide.layer].y + 0.5
-    this.scene.lift(y - this.scene.focusWorld()[1])
+    if (!sel || !b) {
+      this.framedId = null
+      return
+    }
+    if (S.guide.layer === null) return
+    const layer = placedOf(sel).layers[S.guide.layer]
+    if (!layer) return
+    this.scene.frameBuild(b.min, b.max, layer.y + 1, this.framedId === sel.id)
+    this.framedId = sel.id
   }
 
+  /** tight: Bau-Ansicht (Ausrichtung macht followLayer beim nächsten sync) */
   focusPlacement(id: string, tight = false): void {
+    if (tight) {
+      this.framedId = null
+      this.guideKey = ''
+      return
+    }
     const b = this.buildingBounds.get(id)?.b
-    if (b) this.scene.focusOn(b.min, b.max, tight)
+    if (b) this.scene.focusOn(b.min, b.max)
+  }
+
+  /**
+   * Senkrechte Wände rund um den Schnitt (Szenenkoordinaten, Dreiecke): von der Schnitthöhe bis zur Oberkante
+   * des Geländes an der Kante. Wie die Wand einer Baugrube.
+   */
+  private cutWalls(min: Vec3, max: Vec3, y: number): Float32Array {
+    const m = 4
+    const x0 = min[0] - m, z0 = min[2] - m, x1 = max[0] + m, z1 = max[2] + m
+    const [bx, by, bz] = this.scene.base
+    const lo = y - by // ab der Schnittfläche, sonst bleibt ein Spalt von einem Block
+    const out: number[] = []
+    const top = (x: number, z: number) => Math.max(this.terrainTop(x, z) ?? -1e9, -1e9)
+    const quad = (ax: number, az: number, cx: number, cz: number, h: number) => {
+      const hi = h + 1 - by
+      if (hi <= lo) return
+      ax -= bx; cx -= bx; az -= bz; cz -= bz
+      out.push(ax, lo, az, cx, lo, cz, cx, hi, cz, ax, lo, az, cx, hi, cz, ax, hi, az)
+    }
+    for (let x = x0; x <= x1; x++) {
+      quad(x, z0, x + 1, z0, Math.max(top(x, z0), top(x, z0 - 1)))
+      quad(x, z1 + 1, x + 1, z1 + 1, Math.max(top(x, z1), top(x, z1 + 1)))
+    }
+    for (let z = z0; z <= z1; z++) {
+      quad(x0, z, x0, z + 1, Math.max(top(x0, z), top(x0 - 1, z)))
+      quad(x1 + 1, z, x1 + 1, z + 1, Math.max(top(x1, z), top(x1 + 1, z)))
+    }
+    return new Float32Array(out)
   }
 
   private buildingMeshes(layers: Layer[]): BuildingMeshes {

@@ -50,9 +50,11 @@ mini.onJump = (x, z) => {
   view3d.jumpTo(x, z)
   if (S.bigMap) setBigMap(false)
 }
+let wasOutside = false
 view3d.onCamera = () => {
   const [x, , z] = view3d.scene.focusWorld()
   mini.setCamera(x, z, view3d.scene.heading())
+  if (view3d.outside() !== wasOutside) renderStatusChip()
 }
 view3d.onAimText = html => ($('status').innerHTML = html)
 let groundLoading = 0
@@ -418,8 +420,47 @@ const ROLE_LABEL: Record<string, string> = { sockel: 'Sockel', wall: 'Wand', fra
 
 // ---------- Zeichnen ----------
 
+/** Bau-Ansicht (Bauwerk gewählt, eine Ebene offen): linkes Panel einklappen, damit 3D und Bauplan Platz haben. */
+let buildFor: string | null = null
+let collapsedBefore = false
+
+function autoCollapse(): void {
+  const p = selectedPlacement()
+  const build = p && S.guide.layer !== null ? p.id : null
+  if (build === buildFor) return
+  if (build && !buildFor) {
+    collapsedBefore = S.panelCollapsed
+    S.panelCollapsed = true
+  } else if (!build && buildFor && !p) S.panelCollapsed = collapsedBefore
+  buildFor = build ?? (p ? buildFor : null)
+}
+
+/** Teil des 3D-Fensters, den kein Panel verdeckt; dort liegt die Bildmitte. */
+function updateFree(): void {
+  const host = $('three').getBoundingClientRect()
+  if (host.width < 10) return
+  let x0 = 0, x1 = host.width, y1 = host.height
+  for (const id of ['side', 'guide']) {
+    const el = $(id)
+    if (el.hidden) continue
+    const r = el.getBoundingClientRect()
+    if (!r.width || !r.height) continue
+    if (r.width > host.width * 0.6 && r.bottom - host.top > host.height * 0.6) y1 = Math.min(y1, r.top - host.top) // Blatt unten (Handy)
+    else if (r.height < host.height * 0.5) continue // eingeklappt
+    else if (r.left - host.left < host.width / 2) x0 = Math.max(x0, r.right - host.left)
+    else x1 = Math.min(x1, r.left - host.left)
+  }
+  view3d.scene.setFree(x1 - x0 > 120 && y1 > 120 ? { x: x0, y: 0, w: x1 - x0, h: y1 } : null)
+}
+window.addEventListener('resize', updateFree)
+
 function render(): void {
   const on = !!S.session
+  autoCollapse()
+  // Klassen zuerst: die Breite des Bauplans hängt davon ab, ob das linke Panel eingeklappt ist
+  document.body.classList.toggle('placing', !!S.placing)
+  document.body.classList.toggle('has-guide', !!selectedPlacement())
+  document.body.classList.toggle('panel-collapsed', S.panelCollapsed)
   renderSide($('side'), actions)
   renderGuide($('guide'), { textured: texturesCache?.mesher ?? null, color: s => actions.blockColor(s.replace(/\[.*$/, '')) })
   renderStart()
@@ -429,12 +470,11 @@ function render(): void {
   $('mini').classList.toggle('big', S.bigMap)
   $('mini-toggle').innerHTML = S.bigMap ? I.shrink : I.expand
   $('mini-toggle').title = S.bigMap ? 'Karte klein (M)' : 'Karte groß (M)'
-  document.body.classList.toggle('placing', !!S.placing)
-  document.body.classList.toggle('has-guide', !!selectedPlacement())
-  document.body.classList.toggle('panel-collapsed', S.panelCollapsed)
   mini.invalidate()
-  if (on) view3d.sync()
-  else $('status').textContent = ''
+  if (on) {
+    updateFree()
+    view3d.sync()
+  } else $('status').textContent = ''
 }
 
 function renderTools(): void {
@@ -444,7 +484,7 @@ function renderTools(): void {
   const fly = S.camMode === 'fly'
   el.innerHTML = `
     <button class="btn tool ${fly ? 'accent' : ''}" data-t="fly" title="Flugmodus mit Fadenkreuz (F)" aria-pressed="${fly}">${I.fly}<span>Flugmodus</span><kbd>F</kbd></button>
-    <button class="btn tool icon" data-t="home" title="Zurück zum Start">${I.home}</button>
+    <button class="btn tool icon" data-t="home" title="Zur Base">${I.home}</button>
     <button class="btn tool icon" data-t="theme" title="Hell / Dunkel">${document.documentElement.dataset.theme === 'dark' || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches) ? I.sun : I.moon}</button>`
 }
 $('tools').addEventListener('click', e => {
@@ -467,11 +507,13 @@ function renderStatusChip(): void {
   const s = S.session
   const p = s?.progress()
   const parts: string[] = []
-  if (s && groundLoading) parts.push('Gelände lädt')
+  wasOutside = view3d.outside()
+  if (wasOutside) parts.push('Hier gibt es keine Weltdaten (noch nie erkundet). ⌂ oben rechts bringt euch zur Base.')
+  else if (s && groundLoading) parts.push('Gelände lädt')
   if (p && p.done < p.total) parts.push(`Karte ${p.done} / ${p.total}`)
   if (S.textures === 'loading') parts.push(S.texturesFrom ?? 'Texturen')
   el.hidden = !parts.length
-  el.innerHTML = `<span class="dot busy"></span>${esc(parts.join(' · '))}`
+  el.innerHTML = `${wasOutside ? '' : '<span class="dot busy"></span>'}${esc(parts.join(' · '))}`
 }
 
 function renderStart(): void {

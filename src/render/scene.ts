@@ -80,7 +80,9 @@ export class Scene3D {
     this.orbit.enableDamping = true
     this.orbit.dampingFactor = 0.14
     this.orbit.screenSpacePanning = false
-    this.orbit.zoomToCursor = true
+    // Rad-Zoom macht wheel() selbst: das Zoomen „zum Mauszeiger“ von OrbitControls schob den Drehpunkt
+    // bei Zeiger im Himmel oder am Horizont um Tausende Blöcke weiter, bis man außerhalb der Welt stand
+    this.orbit.zoomToCursor = false
     this.orbit.minDistance = 4
     this.orbit.maxDistance = 2600
     this.orbit.maxPolarAngle = Math.PI * 0.49
@@ -145,6 +147,8 @@ export class Scene3D {
       if (hit) this.glideTo(hit.point)
     })
     c.addEventListener('contextmenu', e => e.preventDefault())
+    // vor OrbitControls abfangen (Capture am Elternteil), damit nur ein Zoom läuft
+    host.addEventListener('wheel', e => this.wheel(e), { capture: true, passive: false })
 
     const loop = (t: number) => {
       const dt = Math.min(0.1, (t - this.last) / 1000)
@@ -152,6 +156,7 @@ export class Scene3D {
       if (this.host.offsetParent !== null) {
         if (this.mode === 'fly' ? this.fly.update(dt) : this.walk(dt)) this.needsAim = true
         if (this.glide) this.stepGlide(dt)
+        if (this.zoom) this.stepZoom()
         if (this.mode === 'orbit' && this.orbit.update()) this.needsAim = true
         this.updateFog()
         if (this.needsAim || this.mode === 'fly') {
@@ -210,6 +215,7 @@ export class Scene3D {
       this.orbit.enabled = true
       this.orbit.update()
     }
+    this.applyFree()
     this.lockChanged()
     this.onMode(m)
     this.needsRender = true
@@ -241,6 +247,53 @@ export class Scene3D {
   }
 
   private glide: { from: THREE.Vector3; to: THREE.Vector3; t: number } | null = null
+  /** laufender Rad-Zoom: Fixpunkt (Szene) und noch ausstehender Faktor als Logarithmus */
+  private zoom: { pivot: THREE.Vector3; log: number; sx: number; sy: number; at: number } | null = null
+
+  /**
+   * Rad: näher heran zum Gelände unter dem Mauszeiger (der Punkt bleibt unter dem Zeiger stehen),
+   * weiter weg immer gerade vom Drehpunkt weg. Trifft der Zeiger nichts (Himmel, ungeladen), zoomt es auf den Drehpunkt.
+   * So kann der Drehpunkt nur zu echtem Gelände wandern, nie ins Leere.
+   */
+  private wheel(e: WheelEvent): void {
+    if (this.mode !== 'orbit' || !this.orbit.enabled) return
+    e.preventDefault()
+    e.stopPropagation()
+    this.glide = null
+    let dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1)
+    if (e.ctrlKey) dy *= 3 // Trackpad-Zwicken liefert kleine Werte
+    const log = Math.max(-0.5, Math.min(0.5, dy * 0.0012))
+    const r = this.renderer.domElement.getBoundingClientRect()
+    const sx = e.clientX - r.left, sy = e.clientY - r.top
+    const z = this.zoom
+    // derselbe Fixpunkt, solange der Zeiger stillhält und die Geste weiterläuft (spart Strahlen gegen die Ferne)
+    const same = z && Math.hypot(z.sx - sx, z.sy - sy) < 6 && performance.now() - z.at < 250 && Math.sign(z.log) === Math.sign(log)
+    let pivot = same ? z!.pivot : this.orbit.target.clone()
+    if (!same && log < 0) {
+      const hit = this.pick(new THREE.Vector2((sx / r.width) * 2 - 1, -(sy / r.height) * 2 + 1), true)
+      const dist = this.camera.position.distanceTo(this.orbit.target)
+      if (hit && hit.distance < Math.max(300, dist * 3)) pivot = hit.point.clone()
+    }
+    this.zoom = { pivot, log: (same ? z!.log : 0) + log, sx, sy, at: performance.now() }
+  }
+
+  /** Rad-Zoom weich über ein paar Bilder verteilen. */
+  private stepZoom(): void {
+    const z = this.zoom!
+    const step = Math.abs(z.log) < 0.002 ? z.log : z.log * 0.35
+    z.log -= step
+    const dist = this.camera.position.distanceTo(this.orbit.target)
+    const want = Math.max(this.orbit.minDistance, Math.min(this.orbit.maxDistance, dist * Math.exp(step)))
+    const k = want / dist
+    // Kamera und Drehpunkt um den Fixpunkt skalieren: der Fixpunkt bleibt im Bild, wo er war
+    this.camera.position.sub(z.pivot).multiplyScalar(k).add(z.pivot)
+    this.orbit.target.sub(z.pivot).multiplyScalar(k).add(z.pivot)
+    this.orbit.update()
+    if (z.log === 0 || k === 1) this.zoom = null
+    this.needsRender = true
+    this.needsAim = true
+    this.onMove()
+  }
 
   /** Drehpunkt sanft an eine Stelle (Szenenkoordinaten) schieben, Kamera wandert mit. */
   private glideTo(p: THREE.Vector3): void {
@@ -267,6 +320,7 @@ export class Scene3D {
   jumpTo(x: number, y: number, z: number, dist = 90): void {
     if (this.mode === 'fly') this.setMode('orbit')
     this.glide = null
+    this.zoom = null
     const t = new THREE.Vector3(x - this.base[0], y - this.base[1], z - this.base[2])
     // schräg von oben (etwa 35°), Himmelsrichtung wie bisher; ohne Richtung von Südosten
     const dir = new THREE.Vector3().subVectors(this.camera.position, this.orbit.target).setY(0)
@@ -282,9 +336,45 @@ export class Scene3D {
 
   /** Kamera und Drehpunkt gemeinsam anheben/absenken (an das echte Gelände anpassen). */
   lift(dy: number): void {
-    this.camera.position.y += dy
-    this.orbit.target.y += dy
-    this.orbit.update()
+    this.shift(0, dy, 0)
+  }
+
+  /** Kamera und Drehpunkt gemeinsam verschieben (im Flug nur die Kamera). */
+  shift(dx: number, dy: number, dz: number): void {
+    const d = new THREE.Vector3(dx, dy, dz)
+    this.camera.position.add(d)
+    if (this.mode === 'orbit') {
+      this.orbit.target.add(d)
+      this.orbit.update()
+    }
+    if (this.glide) {
+      this.glide.from.add(d)
+      this.glide.to.add(d)
+    }
+    if (this.zoom) this.zoom.pivot.add(d)
+    this.needsRender = true
+    this.needsAim = true
+  }
+
+  /**
+   * Freier Bereich zwischen den Panels (CSS-Pixel im 3D-Fenster). Die Bildmitte – und damit der Drehpunkt –
+   * liegt dann in seiner Mitte statt hinter einem Panel.
+   */
+  private free: { x: number; y: number; w: number; h: number } | null = null
+
+  setFree(f: { x: number; y: number; w: number; h: number } | null): void {
+    const k = (v: typeof f) => (v ? `${Math.round(v.x)},${Math.round(v.y)},${Math.round(v.w)},${Math.round(v.h)}` : '')
+    if (k(f) === k(this.free)) return
+    this.free = f
+    this.applyFree()
+  }
+
+  private applyFree(): void {
+    const r = this.host.getBoundingClientRect()
+    const f = this.free
+    if (!f || r.width < 2 || this.mode === 'fly') this.camera.clearViewOffset()
+    else this.camera.setViewOffset(r.width, r.height, r.width / 2 - (f.x + f.w / 2), r.height / 2 - (f.y + f.h / 2), r.width, r.height)
+    this.camera.updateProjectionMatrix()
     this.needsRender = true
     this.needsAim = true
   }
@@ -336,6 +426,8 @@ export class Scene3D {
     new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2),
     new THREE.MeshBasicMaterial({ color: 0x8c8c94, transparent: true, opacity: 0.7, depthWrite: false }),
   )
+  /** Wände der Baugrube: ohne sie schaut man in das hohle, weggeschnittene Gelände und sieht den Himmel */
+  private cutWalls = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ color: 0x74747c, side: THREE.DoubleSide }))
 
   private makeMaterials(): void {
     const tex = this.textured?.texture ?? null
@@ -389,8 +481,7 @@ export class Scene3D {
     if (r.width < 2 || r.height < 2) return
     this.renderer.setSize(r.width, r.height, false)
     this.camera.aspect = r.width / r.height
-    this.camera.updateProjectionMatrix()
-    this.needsRender = true
+    this.applyFree()
   }
 
   private geometry(d: MeshData): THREE.BufferGeometry {
@@ -406,8 +497,13 @@ export class Scene3D {
 
   // ---------- Gelände ----------
 
+  /** Alles Gelände weg, neuer Bezugspunkt. Kamera und Drehpunkt bleiben an ihrer Weltstelle. */
   clear(base: Vec3): void {
+    const [ox, oy, oz] = this.base
     this.base = base
+    // Szenenkoordinaten sind relativ zu base: ohne diese Verschiebung sprang die Kamera bei jedem Neuaufbau
+    // um den Abstand weiter, was den nächsten Neuaufbau auslöste – sie lief alle 0,4 s 1.700 Blöcke weiter ins Leere
+    this.shift(ox - base[0], oy - base[1], oz - base[2])
     for (const m of [...this.pieces.values(), ...this.lods.values()]) {
       this.scene.remove(m)
       m.geometry.dispose()
@@ -466,18 +562,50 @@ export class Scene3D {
     return [...this.lods.keys()]
   }
 
-  /** tight: näher ran und nur nach Grundfläche (Bau-Ansicht) */
-  focusOn(min: Vec3, max: Vec3, tight = false): void {
+  /** Ganzes Bauwerk ins Bild (schräg von Südosten). */
+  focusOn(min: Vec3, max: Vec3): void {
     const [bx, by, bz] = this.base
     const c = new THREE.Vector3((min[0] + max[0] + 1) / 2 - bx, (min[1] + max[1]) / 2 - by, (min[2] + max[2] + 1) / 2 - bz)
-    const r = Math.max(max[0] - min[0], tight ? 0 : max[1] - min[1], max[2] - min[2]) + 1
+    const r = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2]) + 1
     if (this.mode === 'fly') this.setMode('orbit')
     this.glide = null
+    this.zoom = null
     this.orbit.target.copy(c)
-    if (tight) this.camera.position.set(c.x + r * 0.55 + 3, c.y + r * 0.75 + 5, c.z + r * 0.75 + 4)
-    else this.camera.position.set(c.x + r * 0.9 + 4, c.y + r * 0.7 + 4, c.z + r * 1.1 + 6)
+    this.camera.position.set(c.x + r * 0.9 + 4, c.y + r * 0.7 + 4, c.z + r * 1.1 + 6)
     this.orbit.update()
     this.needsRender = true
+    this.onMove()
+  }
+
+  /**
+   * Bau-Ansicht: Blick von Süden schräg von oben auf die Ebene y (Norden oben wie im Bauplan), so weit weg,
+   * dass die Grundfläche den freien Bereich gut füllt. keep: Blickwinkel und Abstand des Nutzers behalten,
+   * nur den Drehpunkt auf die Ebene setzen (beim Weiterblättern).
+   */
+  frameBuild(min: Vec3, max: Vec3, y: number, keep: boolean): void {
+    const [bx, by, bz] = this.base
+    const c = new THREE.Vector3((min[0] + max[0] + 1) / 2 - bx, y - by, (min[2] + max[2] + 1) / 2 - bz)
+    if (this.mode === 'fly') this.setMode('orbit')
+    this.glide = null
+    this.zoom = null
+    let offset: THREE.Vector3
+    if (keep) offset = this.camera.position.clone().sub(this.orbit.target)
+    else {
+      const r = this.host.getBoundingClientRect()
+      const f = this.free ?? { x: 0, y: 0, w: r.width, h: r.height }
+      // Grundfläche (mit etwas Rand) soll den freien Bereich gut füllen (schräg gesehen wirkt sie kleiner)
+      const span = Math.max(max[0] - min[0], max[2] - min[2]) + 5
+      const px = 0.8 * Math.min(f.w, f.h)
+      const tan = Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))
+      const dist = Math.max(14, Math.min(400, (span * r.height) / (2 * tan * Math.max(80, px))))
+      const elev = THREE.MathUtils.degToRad(58), az = THREE.MathUtils.degToRad(18)
+      offset = new THREE.Vector3(Math.sin(az) * Math.cos(elev), Math.sin(elev), Math.cos(az) * Math.cos(elev)).multiplyScalar(dist)
+    }
+    this.orbit.target.copy(c)
+    this.camera.position.copy(c).add(offset)
+    this.orbit.update()
+    this.needsRender = true
+    this.needsAim = true
     this.onMove()
   }
 
@@ -528,7 +656,7 @@ export class Scene3D {
   }
 
   /** Schicht-Ansicht für ein Bauwerk: null = ganz; sonst bis einschließlich layer bzw. nur layer. */
-  setGuide(selected: string | null, layer: number | null, single: boolean, cut: { min: Vec3; max: Vec3; y: number } | null = null): void {
+  setGuide(selected: string | null, layer: number | null, single: boolean, cut: { min: Vec3; max: Vec3; y: number; walls: Float32Array } | null = null): void {
     for (const [id, b] of this.buildings) {
       const active = id === selected && layer !== null
       const other = selected !== null && id !== selected
@@ -553,10 +681,16 @@ export class Scene3D {
       this.cutPlane.scale.set(x1 - x0, 1, z1 - z0)
       this.cutPlane.position.set((x0 + x1) / 2, cut.y - by + 0.01, (z0 + z1) / 2)
       if (!this.cutPlane.parent) this.scene.add(this.cutPlane)
+      const g = new THREE.BufferGeometry()
+      g.setAttribute('position', new THREE.BufferAttribute(cut.walls, 3))
+      this.cutWalls.geometry.dispose()
+      this.cutWalls.geometry = g
+      if (!this.cutWalls.parent) this.scene.add(this.cutWalls)
     } else {
       this.cutBox.value.set(0, 0, -1, -1)
       this.cutY.value = 1e9
       this.scene.remove(this.cutPlane)
+      this.scene.remove(this.cutWalls)
     }
     this.needsRender = true
   }

@@ -92,8 +92,25 @@ async function run(theme, width, height, voll) {
   await page.waitForTimeout(2500)
   await warteAufLaden(page)
   await shot('04-weit')
+
+  // Rad mit dem Mauszeiger im Himmel: der Drehpunkt bleibt stehen (früher wanderte er bis weit aus der Welt)
+  const vor = await page.evaluate(() => window.__bp.view3d.scene.focusWorld())
+  await page.mouse.move(c.x + c.width * 0.6, c.y + 6)
+  for (let i = 0; i < 24; i++) await page.mouse.wheel(0, i % 2 ? 250 : -250)
+  await page.waitForTimeout(1200)
+  const nach = await page.evaluate(() => window.__bp.view3d.scene.focusWorld())
+  if (Math.hypot(nach[0] - vor[0], nach[2] - vor[2]) > 16) fail(`${theme} ${width}: Zoomen im Himmel verschiebt den Drehpunkt (${vor.map(Math.round)} → ${nach.map(Math.round)})`)
+  // weit ins Leere geschoben: Kamera kommt an den Rand der Welt zurück
+  await page.evaluate(() => window.__bp.view3d.scene.shift(5e6, -900, 8e6))
+  await page.waitForTimeout(1000)
+  const weg = await page.evaluate(() => [window.__bp.view3d.scene.focusWorld(), window.__bp.S.session.regionBounds()])
+  if (weg[0][0] > weg[1].x1 + 400 || weg[0][2] > weg[1].z1 + 400 || weg[0][1] < -64) fail(`${theme} ${width}: Kamera bleibt außerhalb der Welt (${weg[0].map(Math.round)})`)
+  // ⌂ zurück: dabei wird die Szene neu aufgebaut (weiter als 1700 Blöcke). Früher sprang die Kamera dabei weiter
+  // und lief alle 0,4 s 1700 Blöcke ins Leere (Lukas: X 5.315.601)
   await page.click('[data-t="home"]')
-  await page.waitForTimeout(400)
+  await page.waitForTimeout(2000)
+  const heim = await page.evaluate(() => [window.__bp.view3d.scene.focusWorld(), window.__bp.S.session.hotspots()[0]])
+  if (heim[1] && Math.hypot(heim[0][0] - heim[1].x, heim[0][2] - heim[1].z) > 8) fail(`${theme} ${width}: ⌂ landet nicht an der Base (${heim[0].map(Math.round)})`)
   await warteAufLaden(page)
 
   // Haus setzen, Anleitung erscheint
@@ -109,9 +126,14 @@ async function run(theme, width, height, voll) {
   await page.click('[data-g="next"]')
   await page.waitForTimeout(500)
   await shot('07-ebene')
+  // Bau-Ansicht: linkes Panel eingeklappt, Material mit Bild, Haus mitten im freien Bereich
+  if (!(await page.locator('body.panel-collapsed').count())) fail(`${theme} ${width}: linkes Panel in der Bau-Ansicht nicht eingeklappt`)
+  if (!(await page.locator('.mat .mat-icon').count())) fail(`${theme} ${width}: Materialliste ohne Block-Bilder`)
 
-  // abwählen, dann das Haus wieder anklicken = Anleitung
-  await page.click('[data-act="deselect"]')
+  // schließen (Panel kommt wieder), dann das Haus wieder anklicken = Anleitung
+  await page.click('[data-g="close"]')
+  await page.waitForTimeout(300)
+  if (await page.locator('body.panel-collapsed').count()) fail(`${theme} ${width}: Panel nach der Bau-Ansicht nicht wieder offen`)
   await page.waitForTimeout(300)
   if (await page.locator('#guide:not([hidden])').count()) fail(`${theme} ${width}: Anleitung bleibt nach Abwählen offen`)
   await page.locator('[data-placement]').first().click()
@@ -223,7 +245,7 @@ async function galerie() {
     await page.locator(`[data-placement="${id}"]`).click()
     await page.waitForTimeout(900)
     await page.locator('#three').screenshot({ path: `${OUT}g-${i + 1}-${st}-3d.png` })
-    await page.click('[data-act="deselect"]')
+    await page.click('[data-g="close"]')
   }
   await page.close()
 }

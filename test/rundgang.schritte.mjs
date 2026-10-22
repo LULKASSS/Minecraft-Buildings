@@ -23,7 +23,7 @@ export default async (page, foto) => {
   await page.click('[data-g="next"]')
   await page.waitForTimeout(400)
   await foto('ebene')
-  await page.click('[data-act="deselect"]')
+  await page.click('[data-g="close"]')
   await page.keyboard.press('f')
   await page.waitForTimeout(400)
   await foto('flug')

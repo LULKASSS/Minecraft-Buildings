@@ -2,6 +2,7 @@
 // (Textur aus der .jar, sonst Farbe); Treppen, Stufen, Zäune usw. als Grundriss ihrer Form, höhere Teile heller.
 
 import { parseState, shortName, type BlockState } from '../blueprint/blockstate'
+import { itemsFor } from '../blueprint/materials'
 import type { Layer, WorldBlock } from '../blueprint/placement'
 import { shapeOf } from '../render/shapes'
 import type { TexturedMesher } from '../render/textured'
@@ -29,7 +30,7 @@ export interface PlanGrid {
 
 const LEFT = 34
 const TOP = 20
-const MAX_CELL = 28
+const MAX_CELL = 40
 
 /** Blöcke, die im Plan stehen: die Ebene selbst, bei „Alles“ der oberste Block je Spalte. */
 export function planBlocks(layers: Layer[], index: number | null): WorldBlock[] {
@@ -39,7 +40,16 @@ export function planBlocks(layers: Layer[], index: number | null): WorldBlock[] 
   return [...top.values()]
 }
 
-export function drawPlan(canvas: HTMLCanvasElement, layers: Layer[], index: number | null, box: PlanBox, look: PlanLook, width: number, maxHeight: number): PlanGrid {
+/** Gehört der Block zu diesem Material (Item aus der Liste)? */
+export function usesItem(state: BlockState, item: string): boolean {
+  return itemsFor(state).some(i => i.item === item)
+}
+
+/**
+ * mark: Material, das hervorgehoben wird (Maus über der Liste): seine Kästchen bekommen einen Rahmen,
+ * alle anderen treten zurück.
+ */
+export function drawPlan(canvas: HTMLCanvasElement, layers: Layer[], index: number | null, box: PlanBox, look: PlanLook, width: number, maxHeight: number, mark: string | null = null): PlanGrid {
   const w = box.x1 - box.x0 + 1, d = box.z1 - box.z0 + 1
   const cell = Math.max(5, Math.min(MAX_CELL, Math.floor((width - LEFT - 6) / w), Math.floor((maxHeight - TOP - 6) / d)))
   const cssW = LEFT + w * cell + 6, cssH = TOP + d * cell + 6
@@ -69,6 +79,20 @@ export function drawPlan(canvas: HTMLCanvasElement, layers: Layer[], index: numb
     ctx.globalAlpha = 1
   }
   for (const b of cur) drawBlock(ctx, b.state, px(b.x), pz(b.z), cell, look)
+  // jedes Kästchen leicht plastisch (oben/links hell, unten/rechts dunkel), damit gleiche Blöcke nebeneinander zählbar bleiben
+  if (cell >= 10) for (const b of cur) bevel(ctx, px(b.x), pz(b.z), cell)
+  if (mark) {
+    for (const b of cur) {
+      if (usesItem(b.state, mark)) continue
+      ctx.fillStyle = bg
+      ctx.globalAlpha = 0.78
+      ctx.fillRect(px(b.x), pz(b.z), cell, cell)
+    }
+    ctx.globalAlpha = 1
+    ctx.strokeStyle = accent
+    ctx.lineWidth = 2
+    for (const b of cur) if (usesItem(b.state, mark)) ctx.strokeRect(px(b.x) + 1, pz(b.z) + 1, cell - 2, cell - 2)
+  }
 
   // Raster
   ctx.strokeStyle = line
@@ -117,6 +141,28 @@ export function drawPlan(canvas: HTMLCanvasElement, layers: Layer[], index: numb
   ctx.font = '600 10px Geist, system-ui, sans-serif'
   ctx.fillText('N ↑', 2, TOP / 2)
   return { box, cell, left: LEFT, top: TOP, blocks: at }
+}
+
+function bevel(ctx: CanvasRenderingContext2D, x: number, y: number, cell: number): void {
+  ctx.fillStyle = 'rgba(255,255,255,.16)'
+  ctx.fillRect(x, y, cell, 1)
+  ctx.fillRect(x, y + 1, 1, cell - 1)
+  ctx.fillStyle = 'rgba(0,0,0,.28)'
+  ctx.fillRect(x, y + cell - 1, cell, 1)
+  ctx.fillRect(x + cell - 1, y, 1, cell - 1)
+}
+
+/** Kleines Bild eines Blocks (Oberseite) für die Materialliste – gleich wie im Bauplan. */
+export function drawIcon(canvas: HTMLCanvasElement, state: BlockState, look: PlanLook, size = 22): void {
+  const dpr = Math.min(2, window.devicePixelRatio || 1)
+  canvas.width = Math.round(size * dpr)
+  canvas.height = Math.round(size * dpr)
+  canvas.style.width = canvas.style.height = `${size}px`
+  const ctx = canvas.getContext('2d')!
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.imageSmoothingEnabled = false
+  drawBlock(ctx, state, 0, 0, size, look)
+  bevel(ctx, 0, 0, size)
 }
 
 /** Ein Block von oben: volle Blöcke als Bild, andere als Grundriss ihrer Teile; tiefere Teile dunkler. */

@@ -6,7 +6,8 @@ import type { Layer, Placement } from '../blueprint/placement'
 import { changePlacement, placedOf, S, selectedPlacement, update } from '../app/state'
 import { coord, esc, itemLabel, num } from './format'
 import { I } from './icons'
-import { cellAt, drawPlan, stateHint, type PlanGrid, type PlanLook } from './plan'
+import { itemsFor } from '../blueprint/materials'
+import { cellAt, drawIcon, drawPlan, stateHint, usesItem, type PlanGrid, type PlanLook } from './plan'
 
 let timer: number | undefined
 
@@ -82,16 +83,13 @@ export function renderGuide(el: HTMLElement, look: PlanLook): void {
   const perLayer = g.tab === 'layer' && !!cur
   const mats: MaterialRow[] = perLayer ? cur!.materials : materialsOf(layers.flatMap(l => l.blocks.map(b => b.state)))
   const items = mats.reduce((n, m) => n + m.count, 0)
-  const swatch = (item: string) => {
-    const [r, gg, b] = look.color(item.includes(':') ? item : `minecraft:${item}`)
-    return `<span class="swatch" style="background:rgb(${r},${gg},${b})"></span>`
-  }
+  const icon = `<canvas class="mat-icon" aria-hidden="true"></canvas>`
   const rows = mats.map(m => {
     const on = perLayer && isChecked(p, cur!.index, m.item)
     const count = `<span class="mat-n">${num(m.count)}${m.count >= m.stackSize ? `<small>${formatPacking(m.count, m.stackSize)}</small>` : ''}</span>`
     return perLayer
-      ? `<label class="mat check ${on ? 'on' : ''}"><input type="checkbox" data-check="${esc(m.item)}" ${on ? 'checked' : ''}/><span class="box">${I.check}</span>${swatch(m.item)}<span class="mat-name">${esc(itemLabel(m.item))}</span>${count}</label>`
-      : `<div class="mat">${swatch(m.item)}<span class="mat-name">${esc(itemLabel(m.item))}</span>${count}</div>`
+      ? `<label class="mat check ${on ? 'on' : ''}" data-item="${esc(m.item)}"><input type="checkbox" data-check="${esc(m.item)}" ${on ? 'checked' : ''}/><span class="box">${I.check}</span>${icon}<span class="mat-name">${esc(itemLabel(m.item))}</span>${count}</label>`
+      : `<div class="mat" data-item="${esc(m.item)}">${icon}<span class="mat-name">${esc(itemLabel(m.item))}</span>${count}</div>`
   }).join('')
 
   el.innerHTML = `
@@ -124,21 +122,40 @@ export function renderGuide(el: HTMLElement, look: PlanLook): void {
     <div class="mats-sum">${num(items)} ${items === 1 ? 'Teil' : 'Teile'} · ${mats.length} ${mats.length === 1 ? 'Sorte' : 'Sorten'}${perLayer ? ' in dieser Ebene' : ' insgesamt'}</div>`
 
   placeThumb(el.querySelector('.seg')!)
+  // Bild je Material: ein Block aus dem Bauwerk, der dieses Item kostet (Treppe mit Form, Stufe als Hälfte)
+  const pool = perLayer ? cur!.blocks : layers.flatMap(l => l.blocks)
+  el.querySelectorAll<HTMLElement>('[data-item]').forEach(row => {
+    const item = row.dataset.item!
+    const state = pool.find(b => usesItem(b.state, item))?.state ?? (item.includes(':') ? item : `minecraft:${item}`)
+    drawIcon(row.querySelector<HTMLCanvasElement>('.mat-icon')!, state, look)
+  })
   const canvas = el.querySelector<HTMLCanvasElement>('canvas.plan')!
   const [ox, , oz] = placed.origin
   const [w, , d] = placed.blueprint.size
   const wrap = el.querySelector<HTMLElement>('.plan-wrap')!
-  grid = drawPlan(canvas, layers, g.layer, { x0: ox, z0: oz, x1: ox + w - 1, z1: oz + d - 1 }, look, wrap.clientWidth || 340, window.innerWidth <= 700 ? 260 : 380)
-  bindPlan(canvas, el.querySelector<HTMLElement>('.plan-tip')!, cur)
+  const draw = (mark: string | null) => {
+    grid = drawPlan(canvas, layers, g.layer, { x0: ox, z0: oz, x1: ox + w - 1, z1: oz + d - 1 }, look, wrap.clientWidth || 340,
+      window.innerWidth <= 700 ? 260 : Math.max(380, Math.round(window.innerHeight * 0.58)), mark)
+  }
+  draw(null)
+  // Maus über einem Material: genau diese Kästchen im Plan zeigen
+  el.querySelectorAll<HTMLElement>('[data-item]').forEach(row => {
+    row.addEventListener('mouseenter', () => draw(row.dataset.item!))
+    row.addEventListener('mouseleave', () => draw(null))
+  })
+  bindPlan(canvas, el.querySelector<HTMLElement>('.plan-tip')!, cur, el)
   bind(el, p, layers, cur)
 }
 
-function bindPlan(canvas: HTMLCanvasElement, tip: HTMLElement, cur: Layer | null): void {
+function bindPlan(canvas: HTMLCanvasElement, tip: HTMLElement, cur: Layer | null, el: HTMLElement): void {
+  const mark = (items: string[]) => el.querySelectorAll<HTMLElement>('[data-item]').forEach(r => r.classList.toggle('hl', items.includes(r.dataset.item!)))
   canvas.addEventListener('mousemove', e => {
     if (!grid) return
     const r = canvas.getBoundingClientRect()
     const c = cellAt(grid, e.clientX - r.left, e.clientY - r.top)
     const b = c && grid.blocks.get(`${c.x},${c.z}`)
+    // umgekehrt: Kästchen unter der Maus = Zeile in der Materialliste
+    mark(b ? itemsFor(b.state).map(i => i.item) : [])
     if (!c) {
       tip.hidden = true
       return
@@ -151,7 +168,10 @@ function bindPlan(canvas: HTMLCanvasElement, tip: HTMLElement, cur: Layer | null
     tip.style.left = `${Math.max(4, left)}px`
     tip.style.top = `${e.clientY - r.top + 16}px`
   })
-  canvas.addEventListener('mouseleave', () => (tip.hidden = true))
+  canvas.addEventListener('mouseleave', () => {
+    tip.hidden = true
+    mark([])
+  })
 }
 
 export function placeThumb(seg: HTMLElement): void {
