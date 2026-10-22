@@ -15,6 +15,8 @@ export interface Placement {
   pos: Vec3
   rotation: Rotation
   mirror: boolean
+  /** Bau-Ansicht: abgehaktes Material, je Eintrag „Ebene|Item“ */
+  checks?: string[]
 }
 
 export interface Placed {

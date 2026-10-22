@@ -134,6 +134,7 @@ export function lodMaterial(mask: DetailMask): THREE.ShaderMaterial {
       fogColor: { value: new THREE.Color() },
       fogNear: { value: 300 },
       fogFar: { value: 2500 },
+      gray: { value: 0 },
     },
     vertexShader: /* glsl */ `
       attribute vec2 owner;
@@ -154,6 +155,7 @@ export function lodMaterial(mask: DetailMask): THREE.ShaderMaterial {
       uniform vec3 fogColor;
       uniform float fogNear;
       uniform float fogFar;
+      uniform float gray;
       varying vec3 vColor;
       varying vec2 vXZ;
       varying float vDepth;
@@ -161,7 +163,9 @@ export function lodMaterial(mask: DetailMask): THREE.ShaderMaterial {
         vec2 m = (vXZ - maskOrigin) / maskSize;
         if (m.x >= 0.0 && m.y >= 0.0 && m.x < 1.0 && m.y < 1.0 && texture2D(mask, m).r > 0.5) discard;
         // etwas dunkler: die Kartenfarbe ist ein Mittel, echte Texturen wirken in der Nähe satter
-        gl_FragColor = vec4(mix(vColor * 0.88, fogColor, smoothstep(fogNear, fogFar, vDepth)), 1.0);
+        vec3 c = vColor * 0.88;
+        c = mix(c, vec3(dot(c, vec3(0.299, 0.587, 0.114)) * 0.55 + 0.38), gray);
+        gl_FragColor = vec4(mix(c, fogColor, smoothstep(fogNear, fogFar, vDepth)), 1.0);
         #include <colorspace_fragment>
       }`,
   })

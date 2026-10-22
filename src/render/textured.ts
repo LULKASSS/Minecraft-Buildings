@@ -8,4 +8,6 @@ import type { MeshData, VoxelBlock } from './mesher'
 export interface TexturedMesher {
   texture: THREE.Texture
   mesh(blocks: VoxelBlock[], occludes: (x: number, y: number, z: number, self: BlockState) => boolean, keepTop: boolean): MeshData
+  /** Oberseite des Blocks als 16 × 16-Bild (gefärbt wie im Spiel), für den Bauplan von oben; null = kein Modell */
+  icon(state: BlockState): HTMLCanvasElement | null
 }

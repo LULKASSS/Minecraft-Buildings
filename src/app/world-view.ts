@@ -18,6 +18,7 @@ import { areaGet, type AreaResult } from '../world/area'
 import { NO_SURFACE } from '../world/chunk'
 import { TILE, TRACE } from '../world/tile'
 import { addPlacement, choiceSource, newSeeds, placedOf, placementLabel, rememberCamera, S, saveProject, selectedPlacement, toast, update } from './state'
+import { firstOpenLayer } from '../ui/guide'
 import type { WorldSession } from './world-session'
 
 const PIECE = 32
@@ -370,13 +371,41 @@ export class WorldView {
       }
     }
     const sel = selectedPlacement()
-    this.scene.setGuide(sel ? sel.id : null, S.guide.layer, S.guide.single)
+    const sb = sel && this.buildingBounds.get(sel.id)?.b
+    const cutY = sel && S.guide.layer !== null ? placedOf(sel).layers[S.guide.layer]?.y : undefined
+    const cut = sb && cutY !== undefined && this.terrainAbove(sb.min, sb.max, cutY) ? { min: sb.min, max: sb.max, y: cutY } : null
+    this.scene.setGuide(sel ? sel.id : null, S.guide.layer, S.guide.single, cut)
+    this.followLayer(sel)
     this.syncGhost()
   }
 
-  focusPlacement(id: string): void {
+  private guideKey = ''
+
+  /** Liegt rund ums Bauwerk Gelände über der Ebene y? Dann wird für die Bau-Ansicht geschnitten. */
+  private terrainAbove(min: Vec3, max: Vec3, y: number): boolean {
+    for (let z = min[2] - 4; z <= max[2] + 4; z += 2)
+      for (let x = min[0] - 4; x <= max[0] + 4; x += 2) {
+        const t = this.terrainTop(x, z)
+        if (t !== null && t > y) return true
+      }
+    return false
+  }
+
+  /** Kamera auf die Höhe der aktuellen Ebene heben/senken, damit sie in der Bildmitte bleibt. */
+  private followLayer(sel: Placement | null): void {
+    const key = sel ? `${sel.id}|${S.guide.layer}` : ''
+    if (key === this.guideKey) return
+    this.guideKey = key
+    const b = sel && this.buildingBounds.get(sel.id)?.b
+    if (!sel || !b) return
+    const layers = placedOf(sel).layers
+    const y = S.guide.layer === null ? (b.min[1] + b.max[1]) / 2 : layers[S.guide.layer].y + 0.5
+    this.scene.lift(y - this.scene.focusWorld()[1])
+  }
+
+  focusPlacement(id: string, tight = false): void {
     const b = this.buildingBounds.get(id)?.b
-    if (b) this.scene.focusOn(b.min, b.max)
+    if (b) this.scene.focusOn(b.min, b.max, tight)
   }
 
   private buildingMeshes(layers: Layer[]): BuildingMeshes {
@@ -581,8 +610,12 @@ export class WorldView {
       return
     }
     if (a?.placementId) {
+      // Bau-Ansicht: Kamera zum Bauwerk, erste Ebene, in der noch etwas fehlt
+      const p = S.project.placements.find(q => q.id === a.placementId)
       S.sel = { kind: 'placement', id: a.placementId }
-      S.guide.layer = null
+      S.guide.layer = p ? firstOpenLayer(p) : null
+      S.guide.tab = 'layer'
+      this.focusPlacement(a.placementId, true)
       update()
     } else if (S.sel) {
       S.sel = null

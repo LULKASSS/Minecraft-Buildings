@@ -29,5 +29,6 @@ export const I = {
   expand: svg('<path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5 9 7M2.5 13.5 7 9"/>'),
   shrink: svg('<path d="M13 7H9V3M3 9h4v4M9 7l4.5-4.5M7 9l-4.5 4.5"/>'),
   close: svg('<path d="m4 4 8 8M12 4l-8 8"/>'),
+  check: svg('<path d="m3.5 8.5 3 3 6-7"/>'),
   cube: svg('<path d="M8 1.8 13.5 5v6L8 14.2 2.5 11V5z"/><path d="M2.5 5 8 8.2 13.5 5M8 8.2v6"/>'),
 }

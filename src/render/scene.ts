@@ -326,13 +326,38 @@ export class Scene3D {
     this.needsRender = true
   }
 
+  /** Bau-Ansicht: Gelände und andere Bauwerke grau (0 = normal, 1 = grau) */
+  private gray = { value: 0 }
+  /** Schnitt: über cutY und innerhalb von cutBox (x0, z0, x1, z1 in Szenen-Koordinaten) wird Gelände weggelassen */
+  private cutBox = { value: new THREE.Vector4(0, 0, -1, -1) }
+  private cutY = { value: 1e9 }
+  /** Schnittfläche auf Höhe der aktuellen Ebene, halb durchsichtig (die Ebene darunter scheint durch) */
+  private cutPlane = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0x8c8c94, transparent: true, opacity: 0.7, depthWrite: false }),
+  )
+
   private makeMaterials(): void {
     const tex = this.textured?.texture ?? null
     const base = tex ? { map: tex, vertexColors: true, alphaTest: 0.1, side: THREE.DoubleSide } : { vertexColors: true }
+    const terrain = new THREE.MeshBasicMaterial({ ...base })
+    terrain.onBeforeCompile = sh => {
+      sh.uniforms.gray = this.gray
+      sh.uniforms.cutBox = this.cutBox
+      sh.uniforms.cutY = this.cutY
+      sh.vertexShader = `varying vec3 vScene;\n${sh.vertexShader}`.replace('#include <project_vertex>', `#include <project_vertex>
+        vScene = (modelMatrix * vec4(transformed, 1.0)).xyz;`)
+      sh.fragmentShader = `uniform float gray;\nuniform vec4 cutBox;\nuniform float cutY;\nvarying vec3 vScene;\n${sh.fragmentShader}`
+        .replace('void main() {', `void main() {
+        if (vScene.y > cutY && vScene.x > cutBox.x && vScene.x < cutBox.z && vScene.z > cutBox.y && vScene.z < cutBox.w) discard;`)
+        .replace('#include <opaque_fragment>', `#include <opaque_fragment>
+        float lum = dot(gl_FragColor.rgb, vec3(0.299, 0.587, 0.114));
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(lum * 0.5 + 0.3), gray * 0.9);`)
+    }
     this.mats = {
       normal: new THREE.MeshBasicMaterial(base),
       current: new THREE.MeshBasicMaterial({ ...base }),
-      terrain: new THREE.MeshBasicMaterial({ ...base }),
+      terrain,
       ghost: new THREE.MeshBasicMaterial({ ...base, transparent: true, opacity: 0.6, depthWrite: false }),
       line: new THREE.LineBasicMaterial({ color: 0x7f5fe8, transparent: true, opacity: 0.9 }),
     }
@@ -348,7 +373,8 @@ export class Scene3D {
     this.lodMat.uniforms.fogColor.value = sky
     this.fogKey = ''
     this.mats.line.color = accent
-    this.mats.current.color = new THREE.Color(1, 1, 1).lerp(accent, 0.42)
+    // nur leicht getönt: die Blöcke der aktuellen Ebene sollen erkennbar bleiben, das Raster obendrauf markiert sie
+    this.mats.current.color = new THREE.Color(1, 1, 1).lerp(accent, 0.16)
     this.needsRender = true
   }
 
@@ -440,14 +466,16 @@ export class Scene3D {
     return [...this.lods.keys()]
   }
 
-  focusOn(min: Vec3, max: Vec3): void {
+  /** tight: näher ran und nur nach Grundfläche (Bau-Ansicht) */
+  focusOn(min: Vec3, max: Vec3, tight = false): void {
     const [bx, by, bz] = this.base
     const c = new THREE.Vector3((min[0] + max[0] + 1) / 2 - bx, (min[1] + max[1]) / 2 - by, (min[2] + max[2] + 1) / 2 - bz)
-    const r = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2]) + 1
+    const r = Math.max(max[0] - min[0], tight ? 0 : max[1] - min[1], max[2] - min[2]) + 1
     if (this.mode === 'fly') this.setMode('orbit')
     this.glide = null
     this.orbit.target.copy(c)
-    this.camera.position.set(c.x + r * 0.9 + 4, c.y + r * 0.7 + 4, c.z + r * 1.1 + 6)
+    if (tight) this.camera.position.set(c.x + r * 0.55 + 3, c.y + r * 0.75 + 5, c.z + r * 0.75 + 4)
+    else this.camera.position.set(c.x + r * 0.9 + 4, c.y + r * 0.7 + 4, c.z + r * 1.1 + 6)
     this.orbit.update()
     this.needsRender = true
     this.onMove()
@@ -500,18 +528,36 @@ export class Scene3D {
   }
 
   /** Schicht-Ansicht für ein Bauwerk: null = ganz; sonst bis einschließlich layer bzw. nur layer. */
-  setGuide(selected: string | null, layer: number | null, single: boolean): void {
+  setGuide(selected: string | null, layer: number | null, single: boolean, cut: { min: Vec3; max: Vec3; y: number } | null = null): void {
     for (const [id, b] of this.buildings) {
       const active = id === selected && layer !== null
+      const other = selected !== null && id !== selected
       b.layers.forEach((g, i) => {
         const mesh = g.getObjectByName('building') as THREE.Mesh
         const grid = g.getObjectByName('grid') as THREE.LineSegments
         g.visible = !active || (single ? i === layer : i <= layer!)
-        mesh.material = active && i === layer ? this.mats.current : this.mats.normal
+        mesh.material = active && i === layer ? this.mats.current : other ? this.mats.terrain : this.mats.normal
         grid.visible = active && i === layer
       })
     }
-    this.mats.terrain.color.setScalar(layer === null ? 1 : 0.72)
+    // Bau-Ansicht: alles außer dem gewählten Bauwerk grau, damit nur das zählt, was gebaut wird
+    this.gray.value = selected ? 1 : 0
+    this.lodMat.uniforms.gray.value = this.gray.value
+    // Schnitt: Gelände über der aktuellen Ebene rund ums Bauwerk weglassen, damit Hang und Wasser nichts verdecken
+    const [bx, by, bz] = this.base
+    const m = 4
+    if (cut) {
+      const x0 = cut.min[0] - m - bx, z0 = cut.min[2] - m - bz, x1 = cut.max[0] + 1 + m - bx, z1 = cut.max[2] + 1 + m - bz
+      this.cutBox.value.set(x0, z0, x1, z1)
+      this.cutY.value = cut.y + 1 - by
+      this.cutPlane.scale.set(x1 - x0, 1, z1 - z0)
+      this.cutPlane.position.set((x0 + x1) / 2, cut.y - by + 0.01, (z0 + z1) / 2)
+      if (!this.cutPlane.parent) this.scene.add(this.cutPlane)
+    } else {
+      this.cutBox.value.set(0, 0, -1, -1)
+      this.cutY.value = 1e9
+      this.scene.remove(this.cutPlane)
+    }
     this.needsRender = true
   }
 

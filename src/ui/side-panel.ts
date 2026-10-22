@@ -16,7 +16,7 @@ import {
 } from '../app/state'
 import { coord, esc, num } from '../ui/format'
 import { I } from './icons'
-import { placeThumb } from './guide'
+import { firstOpenLayer, placeThumb } from './guide'
 import { duration } from '../map/map-view'
 
 export interface SideActions {
@@ -29,7 +29,7 @@ export interface SideActions {
   cancelPlacing(): void
   toggleTheme(): void
   focusPoint(x: number, z: number): void
-  focusPlacement(id: string): void
+  focusPlacement(id: string, tight?: boolean): void
   learnPalette(): void
   importTemplate(): void
   removeTemplate(id: string): void
@@ -389,9 +389,12 @@ function bind(el: HTMLElement, a: SideActions): void {
   const thumb = el.querySelector<HTMLElement>('#cat-seg')
   if (thumb) placeThumb(thumb)
   el.querySelectorAll<HTMLElement>('[data-placement]').forEach(b => b.addEventListener('click', () => {
+    // wie Anklicken in 3D: Bau-Ansicht ab der ersten offenen Ebene
+    const q = S.project.placements.find(x => x.id === b.dataset.placement)
     S.sel = { kind: 'placement', id: b.dataset.placement! }
-    S.guide.layer = null
-    a.focusPlacement(b.dataset.placement!)
+    S.guide.layer = q ? firstOpenLayer(q) : null
+    S.guide.tab = 'layer'
+    a.focusPlacement(b.dataset.placement!, true)
     update()
   }))
   el.querySelectorAll<HTMLElement>('[data-nudge]').forEach(b => b.addEventListener('click', () => {

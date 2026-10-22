@@ -1,89 +1,157 @@
-// Untere Leiste: Bauanleitung Schicht für Schicht, mit Materialliste.
+// Bau-Ansicht rechts: Ebene für Ebene mit Bauplan von oben, Material zum Abhaken und Fortschritt.
+// Die 3D-Ansicht daneben zeigt das Bauwerk bis zur aktuellen Ebene, die aktuelle leuchtet, das Gelände ist grau.
 
 import { formatPacking, materialsOf, type MaterialRow } from '../blueprint/materials'
-import type { Layer } from '../blueprint/placement'
-import { placedOf, S, selectedPlacement, update } from '../app/state'
-import { fallbackColor } from '../render/block-colors'
+import type { Layer, Placement } from '../blueprint/placement'
+import { changePlacement, placedOf, S, selectedPlacement, update } from '../app/state'
 import { coord, esc, itemLabel, num } from './format'
 import { I } from './icons'
+import { cellAt, drawPlan, stateHint, type PlanGrid, type PlanLook } from './plan'
 
 let timer: number | undefined
 
-export function renderGuide(el: HTMLElement): void {
+const key = (layer: number, item: string) => `${layer}|${item}`
+
+export function isChecked(p: Placement, layer: number, item: string): boolean {
+  return !!p.checks?.includes(key(layer, item))
+}
+
+export function layerDone(p: Placement, l: Layer): boolean {
+  return l.materials.length > 0 && l.materials.every(m => isChecked(p, l.index, m.item))
+}
+
+/** Erste Ebene, in der noch etwas fehlt (leere Ebenen zählen nicht). */
+export function firstOpenLayer(p: Placement): number {
+  const { layers } = placedOf(p)
+  const i = layers.findIndex(l => l.blocks.length > 0 && !layerDone(p, l))
+  return i < 0 ? 0 : i
+}
+
+function toggle(p: Placement, layer: number, item: string): void {
+  changePlacement(p.id, q => {
+    const set = new Set(q.checks ?? [])
+    const k = key(layer, item)
+    if (set.has(k)) set.delete(k)
+    else set.add(k)
+    q.checks = [...set]
+  })
+}
+
+/** Ganze Ebene abhaken und zur nächsten offenen springen. */
+function finishLayer(p: Placement, l: Layer, count: number): void {
+  changePlacement(p.id, q => {
+    const set = new Set(q.checks ?? [])
+    const all = l.materials.every(m => set.has(key(l.index, m.item)))
+    for (const m of l.materials) all ? set.delete(key(l.index, m.item)) : set.add(key(l.index, m.item))
+    q.checks = [...set]
+    if (!all) S.guide.layer = Math.min(count - 1, l.index + 1)
+  })
+}
+
+let grid: PlanGrid | null = null
+
+export function renderGuide(el: HTMLElement, look: PlanLook): void {
   const p = selectedPlacement()
   el.hidden = !p
   if (!p) {
     stop()
     return
   }
-  const { layers } = placedOf(p)
+  const { placed, layers } = placedOf(p)
   const g = S.guide
   if (g.layer !== null && g.layer >= layers.length) g.layer = layers.length - 1
   const cur = g.layer === null ? null : layers[g.layer]
   const max = Math.max(...layers.map(l => l.blocks.length), 1)
-  const every = layers.length > 32 ? 4 : layers.length > 16 ? 2 : 1
+  const done = layers.filter(l => l.blocks.length && layerDone(p, l)).length
+  const filled = layers.filter(l => l.blocks.length).length
 
   const ticks = layers.map((l, i) => {
-    const cls = g.layer === null ? '' : i === g.layer ? 'cur' : i < g.layer ? 'done' : ''
-    const hgt = 8 + (l.blocks.length / max) * 34
-    return `<button class="tick ${cls}" data-layer="${i}" title="Ebene ${i + 1} · Y ${l.y} · ${l.blocks.length} Blöcke">
-      <span class="bar" style="height:${hgt}px"></span><span class="lbl">${i % every === 0 || i === g.layer ? l.y : ''}</span></button>`
+    const cls = [g.layer === i ? 'cur' : '', layerDone(p, l) ? 'ok' : ''].join(' ')
+    const hgt = 6 + (l.blocks.length / max) * 26
+    return `<button class="tick ${cls}" data-layer="${i}" title="Ebene ${i + 1} · Y ${l.y} · ${l.blocks.length} Blöcke${layerDone(p, l) ? ' · fertig' : ''}">
+      <span class="bar" style="height:${hgt}px"></span></button>`
   }).join('')
 
   const total = layers.reduce((n, l) => n + l.blocks.length, 0)
   const head = cur
-    ? `<div class="g-layer">Ebene ${cur.index + 1}<small>/ ${layers.length} · Y ${coord(cur.y)}</small></div>
-       <div class="g-info"><b>${num(cur.blocks.length)} Blöcke</b> · ${extent(cur)}</div>`
+    ? `<div class="g-layer">Ebene ${cur.index + 1}<small>/ ${layers.length}</small></div>
+       <div class="g-info"><b>Y ${coord(cur.y)}</b> · ${num(cur.blocks.length)} ${cur.blocks.length === 1 ? 'Block' : 'Blöcke'}${layerDone(p, cur) ? ' · <span class="ok-txt">fertig</span>' : ''}</div>`
     : `<div class="g-layer">Ganzes Bauwerk<small>${layers.length} Ebenen</small></div>
        <div class="g-info"><b>${num(total)} Blöcke</b> · Y ${coord(layers[0].y)} bis ${coord(layers[layers.length - 1].y)}</div>`
 
-  const mats: MaterialRow[] = g.tab === 'layer' && cur ? cur.materials : materialsOf(layers.flatMap(l => l.blocks.map(b => b.state)))
+  const perLayer = g.tab === 'layer' && !!cur
+  const mats: MaterialRow[] = perLayer ? cur!.materials : materialsOf(layers.flatMap(l => l.blocks.map(b => b.state)))
   const items = mats.reduce((n, m) => n + m.count, 0)
+  const swatch = (item: string) => {
+    const [r, gg, b] = look.color(item.includes(':') ? item : `minecraft:${item}`)
+    return `<span class="swatch" style="background:rgb(${r},${gg},${b})"></span>`
+  }
+  const rows = mats.map(m => {
+    const on = perLayer && isChecked(p, cur!.index, m.item)
+    const count = `<span class="mat-n">${num(m.count)}${m.count >= m.stackSize ? `<small>${formatPacking(m.count, m.stackSize)}</small>` : ''}</span>`
+    return perLayer
+      ? `<label class="mat check ${on ? 'on' : ''}"><input type="checkbox" data-check="${esc(m.item)}" ${on ? 'checked' : ''}/><span class="box">${I.check}</span>${swatch(m.item)}<span class="mat-name">${esc(itemLabel(m.item))}</span>${count}</label>`
+      : `<div class="mat">${swatch(m.item)}<span class="mat-name">${esc(itemLabel(m.item))}</span>${count}</div>`
+  }).join('')
 
   el.innerHTML = `
-    <div class="g-left">
-      <div class="g-head">
-        <div>${head}</div>
-        <div class="g-controls">
-          <button class="chip" data-g="all" aria-pressed="${g.layer === null}">Alles</button>
-          <button class="btn small icon" data-g="prev" title="Ebene tiefer ([)" ${g.layer === 0 ? 'disabled' : ''}>${I.prev}</button>
-          <button class="btn small icon ${g.playing ? '' : 'primary'}" data-g="play" title="Abspielen (P)">${g.playing ? I.pause : I.play}</button>
-          <button class="btn small icon" data-g="next" title="Ebene höher (])" ${g.layer === layers.length - 1 ? 'disabled' : ''}>${I.next}</button>
-          <button class="chip" data-g="single" aria-pressed="${g.single}" ${g.layer === null ? 'disabled' : ''}>Nur diese Ebene</button>
-        </div>
-      </div>
-      <div class="timeline">${ticks}</div>
-      <div class="g-blocks">${cur ? blockLine(cur) : ''}</div>
+    <div class="g-top">
+      <div class="g-title">${head}</div>
+      <button class="btn ghost small icon" data-g="close" title="Bau-Ansicht schließen (Esc)">${I.close}</button>
     </div>
-    <div class="g-right">
-      <div class="seg" role="tablist">
-        <button class="seg-btn" data-tab="layer" aria-selected="${g.tab === 'layer' && !!cur}" ${cur ? '' : 'disabled'}>Diese Ebene</button>
-        <button class="seg-btn" data-tab="all" aria-selected="${g.tab === 'all' || !cur}">Gesamt</button>
-        <span class="seg-thumb" aria-hidden="true"></span>
-      </div>
-      <div class="mats">${mats.map(m => {
-        const [r, gg, b] = fallbackColor(m.item)
-        return `<div class="mat"><span class="swatch" style="background:rgb(${r},${gg},${b})"></span>
-          <span class="mat-name">${esc(itemLabel(m.item))}</span>
-          <span class="mat-n">${num(m.count)}${m.count >= m.stackSize ? `<small>${formatPacking(m.count, m.stackSize)}</small>` : ''}</span></div>`
-      }).join('')}</div>
-      <div class="mats-sum">${num(items)} Teile · ${mats.length} Sorten</div>
-    </div>`
-  placeThumb(el.querySelector('.g-right .seg')!)
-  bind(el, layers)
+    <div class="g-controls">
+      <button class="chip" data-g="all" aria-pressed="${g.layer === null}">Alles</button>
+      <button class="btn small icon" data-g="prev" title="Ebene tiefer (↓)" ${g.layer === 0 ? 'disabled' : ''}>${I.prev}</button>
+      <button class="btn small icon ${g.playing ? '' : 'primary'}" data-g="play" title="Abspielen (P)">${g.playing ? I.pause : I.play}</button>
+      <button class="btn small icon" data-g="next" title="Ebene höher (↑)" ${g.layer === layers.length - 1 ? 'disabled' : ''}>${I.next}</button>
+      <button class="chip" data-g="single" aria-pressed="${g.single}" ${g.layer === null ? 'disabled' : ''}>Nur diese Ebene</button>
+    </div>
+    <div class="timeline" title="${done} von ${filled} Ebenen fertig">${ticks}</div>
+    <div class="g-progress"><span style="width:${filled ? Math.round((done / filled) * 100) : 0}%"></span></div>
+    <div class="g-sub">${done} von ${filled} Ebenen fertig</div>
+    <div class="plan-wrap">
+      <canvas class="plan" aria-label="Bauplan von oben"></canvas>
+      <div class="plan-tip" hidden></div>
+    </div>
+    <div class="g-sub">Von oben, Norden oben · ein Kästchen = ein Block${cur && cur.index > 0 ? ' · blass = Ebene darunter' : ''}</div>
+    <div class="seg" role="tablist">
+      <button class="seg-btn" data-tab="layer" aria-selected="${perLayer}" ${cur ? '' : 'disabled'}>Diese Ebene</button>
+      <button class="seg-btn" data-tab="all" aria-selected="${!perLayer}">Gesamt</button>
+      <span class="seg-thumb" aria-hidden="true"></span>
+    </div>
+    <div class="mats">${rows}</div>
+    ${perLayer && cur!.materials.length ? `<button class="btn ${layerDone(p, cur!) ? '' : 'accent'} g-done" data-g="done">${I.check}${layerDone(p, cur!) ? 'Wieder offen' : 'Ebene fertig'}</button>` : ''}
+    <div class="mats-sum">${num(items)} ${items === 1 ? 'Teil' : 'Teile'} · ${mats.length} ${mats.length === 1 ? 'Sorte' : 'Sorten'}${perLayer ? ' in dieser Ebene' : ' insgesamt'}</div>`
+
+  placeThumb(el.querySelector('.seg')!)
+  const canvas = el.querySelector<HTMLCanvasElement>('canvas.plan')!
+  const [ox, , oz] = placed.origin
+  const [w, , d] = placed.blueprint.size
+  const wrap = el.querySelector<HTMLElement>('.plan-wrap')!
+  grid = drawPlan(canvas, layers, g.layer, { x0: ox, z0: oz, x1: ox + w - 1, z1: oz + d - 1 }, look, wrap.clientWidth || 340, window.innerWidth <= 700 ? 260 : 380)
+  bindPlan(canvas, el.querySelector<HTMLElement>('.plan-tip')!, cur)
+  bind(el, p, layers, cur)
 }
 
-function extent(l: Layer): string {
-  if (!l.blocks.length) return 'leer'
-  const xs = l.blocks.map(b => b.x), zs = l.blocks.map(b => b.z)
-  return `X ${coord(Math.min(...xs))} bis ${coord(Math.max(...xs))} · Z ${coord(Math.min(...zs))} bis ${coord(Math.max(...zs))}`
-}
-
-function blockLine(l: Layer): string {
-  // Erster Block der Schicht (nördlichste Reihe, dann westlichster) als Anhaltspunkt im Spiel
-  if (!l.blocks.length) return ''
-  const first = l.blocks[0]
-  return `Beginn bei <b>${coord(first.x)} ${coord(first.y)} ${coord(first.z)}</b>`
+function bindPlan(canvas: HTMLCanvasElement, tip: HTMLElement, cur: Layer | null): void {
+  canvas.addEventListener('mousemove', e => {
+    if (!grid) return
+    const r = canvas.getBoundingClientRect()
+    const c = cellAt(grid, e.clientX - r.left, e.clientY - r.top)
+    const b = c && grid.blocks.get(`${c.x},${c.z}`)
+    if (!c) {
+      tip.hidden = true
+      return
+    }
+    const y = b ? b.y : cur?.y
+    const hint = b ? stateHint(b.state) : ''
+    tip.innerHTML = `${b ? `<b>${esc(itemLabel(b.state.replace(/\[.*$/, '')))}</b>${hint ? ` · ${esc(hint)}` : ''}<br>` : '<b>frei</b><br>'}X ${coord(c.x)} · Y ${y !== undefined ? coord(y) : '–'} · Z ${coord(c.z)}`
+    tip.hidden = false
+    const left = Math.min(e.clientX - r.left + 14, canvas.clientWidth - tip.offsetWidth - 4)
+    tip.style.left = `${Math.max(4, left)}px`
+    tip.style.top = `${e.clientY - r.top + 16}px`
+  })
+  canvas.addEventListener('mouseleave', () => (tip.hidden = true))
 }
 
 export function placeThumb(seg: HTMLElement): void {
@@ -94,7 +162,7 @@ export function placeThumb(seg: HTMLElement): void {
   thumb.style.transform = `translateX(${sel.offsetLeft - 3}px)`
 }
 
-function bind(el: HTMLElement, layers: Layer[]): void {
+function bind(el: HTMLElement, p: Placement, layers: Layer[], cur: Layer | null): void {
   el.querySelectorAll<HTMLElement>('[data-layer]').forEach(b => b.addEventListener('click', () => {
     stop()
     S.guide.layer = Number(b.dataset.layer)
@@ -104,6 +172,9 @@ function bind(el: HTMLElement, layers: Layer[]): void {
     S.guide.tab = b.dataset.tab as 'layer' | 'all'
     update()
   }))
+  el.querySelectorAll<HTMLInputElement>('[data-check]').forEach(b => b.addEventListener('change', () => {
+    if (cur) toggle(p, cur.index, b.dataset.check!)
+  }))
   el.querySelectorAll<HTMLElement>('[data-g]').forEach(b => b.addEventListener('click', () => {
     switch (b.dataset.g) {
       case 'all': stop(); S.guide.layer = null; break
@@ -111,6 +182,8 @@ function bind(el: HTMLElement, layers: Layer[]): void {
       case 'next': stop(); step(1, layers.length); break
       case 'single': S.guide.single = !S.guide.single; break
       case 'play': S.guide.playing ? stop() : play(layers.length); break
+      case 'close': stop(); S.sel = null; break
+      case 'done': if (cur) return finishLayer(p, cur, layers.length); break
     }
     update()
   }))

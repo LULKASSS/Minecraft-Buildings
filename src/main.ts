@@ -325,8 +325,8 @@ const actions: SideActions = {
   focusPoint(x, z) {
     view3d.jumpTo(x, z, 140)
   },
-  focusPlacement(id) {
-    view3d.focusPlacement(id)
+  focusPlacement(id, tight) {
+    view3d.focusPlacement(id, tight)
   },
   learnPalette() {
     const r = learnPalette(view3d.blockCounts(), S.build.style, 'Aus der Umgebung')
@@ -421,7 +421,7 @@ const ROLE_LABEL: Record<string, string> = { sockel: 'Sockel', wall: 'Wand', fra
 function render(): void {
   const on = !!S.session
   renderSide($('side'), actions)
-  renderGuide($('guide'))
+  renderGuide($('guide'), { textured: texturesCache?.mesher ?? null, color: s => actions.blockColor(s.replace(/\[.*$/, '')) })
   renderStart()
   renderTools()
   renderStatusChip()
@@ -578,9 +578,12 @@ window.addEventListener('keydown', e => {
   if (!p) return
   const count = placedOf(p).layers.length
   const moves: Record<string, Vec3> = { ArrowLeft: [-1, 0, 0], ArrowRight: [1, 0, 0], ArrowUp: [0, 0, -1], ArrowDown: [0, 0, 1], PageUp: [0, 1, 0], PageDown: [0, -1, 0] }
-  if (e.key === '[' || e.key === ']') {
+  // In der Bau-Ansicht (eine Ebene gewählt) blättern die Pfeiltasten durch die Ebenen, statt das Bauwerk zu verschieben
+  const layerKeys: Record<string, number> = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1 }
+  if (e.key === '[' || e.key === ']' || (S.guide.layer !== null && e.key in layerKeys)) {
+    e.preventDefault()
     stop()
-    step(e.key === ']' ? 1 : -1, count)
+    step(e.key === ']' ? 1 : e.key === '[' ? -1 : layerKeys[e.key], count)
   } else if (e.code === 'KeyP') {
     S.guide.playing ? stop() : play(count)
   } else if (e.code === 'KeyR') {

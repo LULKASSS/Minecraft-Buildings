@@ -122,6 +122,41 @@ class DeepslateMesher implements TexturedMesher {
     private white: [number, number],
   ) {}
 
+  private icons = new Map<BlockState, HTMLCanvasElement | null>()
+
+  icon(state: BlockState): HTMLCanvasElement | null {
+    if (this.icons.has(state)) return this.icons.get(state)!
+    let out: HTMLCanvasElement | null = null
+    // oberste Fläche, die nach oben zeigt; ohne solche (z. B. Tür) die größte Seitenfläche
+    const qs = this.quads(state, 0)
+    const ups = qs?.filter(q => q.n[1] > 0.5) ?? []
+    const q = ups.sort((a, b) => Math.max(b.pos[1], b.pos[4], b.pos[7]) - Math.max(a.pos[1], a.pos[4], a.pos[7]))[0] ?? qs?.[0]
+    const img = this.texture.image as HTMLCanvasElement | undefined
+    if (q && img) {
+      const us = [q.uv[0], q.uv[2], q.uv[4], q.uv[6]], vs = [q.uv[1], q.uv[3], q.uv[5], q.uv[7]]
+      const u0 = Math.min(...us) * img.width, v0 = Math.min(...vs) * img.height
+      const w = Math.max(1, (Math.max(...us) - Math.min(...us)) * img.width), h = Math.max(1, (Math.max(...vs) - Math.min(...vs)) * img.height)
+      out = document.createElement('canvas')
+      out.width = out.height = 16
+      const ctx = out.getContext('2d')!
+      ctx.imageSmoothingEnabled = false
+      ctx.drawImage(img, u0, v0, w, h, 0, 0, 16, 16)
+      // Färbung (Gras, Laub, Wasser) steckt in den Eckfarben
+      const [r, g, b] = q.col
+      if (r < 0.99 || g < 0.99 || b < 0.99) {
+        const d = ctx.getImageData(0, 0, 16, 16)
+        for (let i = 0; i < d.data.length; i += 4) {
+          d.data[i] *= r
+          d.data[i + 1] *= g
+          d.data[i + 2] *= b
+        }
+        ctx.putImageData(d, 0, 0)
+      }
+    }
+    this.icons.set(state, out)
+    return out
+  }
+
   private quads(state: BlockState, mask: number): Quads | null {
     const key = `${state}|${mask}`
     if (this.cache.has(key)) return this.cache.get(key)!
